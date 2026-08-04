@@ -34,9 +34,12 @@ type Session struct {
 	// Nickname 展示昵称。
 	Nickname string
 
-	conn   *websocket.Conn
-	send   chan []byte
-	logger *logx.Logger
+	conn        *websocket.Conn
+	send        chan []byte
+	logger      *logx.Logger
+	manager     *Manager
+	remoteAddr  string
+	connectedAt time.Time
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -54,9 +57,12 @@ type Options struct {
 	Conn *websocket.Conn
 	// Logger 日志器。
 	Logger *logx.Logger
+	// Manager 可选，非空时自动 Register，Close 时 Unregister。
+	Manager *Manager
 }
 
-// New 创建会话并启动读写泵。
+// New 创建会话、登记 Manager（若有）并启动读写泵。
+// 调用方不应在 handler 里阻塞等待；连接由泵与 Manager.CloseAll 管理。
 func New(options Options) (*Session, error) {
 	if options.Conn == nil {
 		return nil, fmt.Errorf("session: conn is nil: %w", errs.ErrInvalidArgument)
@@ -68,14 +74,26 @@ func New(options Options) (*Session, error) {
 		options.ID = logx.NewTraceID()
 	}
 
+	remoteAddr := ""
+	if options.Conn.RemoteAddr() != nil {
+		remoteAddr = options.Conn.RemoteAddr().String()
+	}
+
 	playerSession := &Session{
-		ID:       options.ID,
-		PlayerID: options.PlayerID,
-		Nickname: options.Nickname,
-		conn:     options.Conn,
-		send:     make(chan []byte, sendBufferSize),
-		logger:   options.Logger,
-		closed:   make(chan struct{}),
+		ID:          options.ID,
+		PlayerID:    options.PlayerID,
+		Nickname:    options.Nickname,
+		conn:        options.Conn,
+		send:        make(chan []byte, sendBufferSize),
+		logger:      options.Logger,
+		manager:     options.Manager,
+		remoteAddr:  remoteAddr,
+		connectedAt: time.Now(),
+		closed:      make(chan struct{}),
+	}
+
+	if options.Manager != nil {
+		options.Manager.Register(playerSession)
 	}
 
 	go playerSession.writePump()
@@ -84,7 +102,7 @@ func New(options Options) (*Session, error) {
 	return playerSession, nil
 }
 
-// Done 在会话关闭时关闭，供调用方阻塞等待。
+// Done 在会话关闭时关闭，供可选等待。
 func (s *Session) Done() <-chan struct{} {
 	return s.closed
 }
@@ -112,11 +130,26 @@ func (s *Session) Send(data []byte) error {
 	}
 }
 
-// Close 关闭连接；可重复调用。
+// Close 关闭连接、注销 Manager 并打断线日志；可重复调用。
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
-		_ = s.conn.Close()
+		if s.conn != nil {
+			_ = s.conn.Close()
+		}
+
+		if s.manager != nil {
+			s.manager.Unregister(s.ID)
+		}
+
+		// 断线日志：覆盖整段在线时长（与握手访问日志成对）。
+		ctx := logx.IntoContext(context.Background(), s.logger, logx.NewTraceID())
+		s.logger.WithContext(ctx).Info("ws connection closed",
+			"conn_id", s.ID,
+			"player_id", s.PlayerID,
+			"remote", s.remoteAddr,
+			"duration_ms", time.Since(s.connectedAt).Milliseconds(),
+		)
 	})
 }
 
@@ -238,6 +271,8 @@ func (s *Session) writePump() {
 		case message := <-s.send:
 			_ = s.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := s.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				// 写失败时主动 Close，触发断线日志与 Unregister。
+				s.Close()
 				return
 			}
 		}

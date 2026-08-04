@@ -23,7 +23,9 @@ var upgrader = websocket.Upgrader{
 
 // handleWebSocket 校验 token 后升级连接，启动 Session 并下发 hello。
 //
-// 本 handler 会阻塞直到连接关闭，以便外层访问日志记录整段 WS 时长。
+// 升级成功后立即返回：每连接仅保留 read/write 两个泵；
+// 握手访问日志由中间件在本 handler 返回时打出；
+// 断线日志与登记清理由 Session.Close / Manager 负责。
 func (s *Server) handleWebSocket(writer http.ResponseWriter, request *http.Request) {
 	token := request.URL.Query().Get("token")
 	authSession, err := s.auth.Authenticate(token)
@@ -46,22 +48,19 @@ func (s *Server) handleWebSocket(writer http.ResponseWriter, request *http.Reque
 		Nickname: authSession.Nickname,
 		Conn:     conn,
 		Logger:   s.logger,
+		Manager:  s.sessions,
 	})
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
-	defer playerSession.Close()
 
 	if err := playerSession.SendHello(); err != nil {
+		// 发送失败则主动关闭（会 Unregister + 断线日志）。
+		playerSession.Close()
 		return
 	}
-
-	// 阻塞至会话结束或请求上下文取消（进程关闭时）。
-	select {
-	case <-playerSession.Done():
-	case <-request.Context().Done():
-	}
+	// 不再阻塞等待 Done；连接由泵与 Shutdown→CloseAll 管理。
 }
 
 // mapAuthError 将鉴权错误映射为 HTTP 状态码与对外错误码。

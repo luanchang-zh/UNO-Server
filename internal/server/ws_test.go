@@ -87,3 +87,39 @@ func TestWebSocket_RejectBadToken(t *testing.T) {
 		t.Fatalf("期望 401，实际 response=%v err=%v", response, err)
 	}
 }
+
+// TestWebSocket_RegisterAndClose 验证连接登记与主动关闭后计数归零。
+func TestWebSocket_RegisterAndClose(t *testing.T) {
+	srv := newTestServer(io.Discard)
+	testServer := httptest.NewServer(srv.httpServer.Handler)
+	defer testServer.Close()
+
+	loginResult, err := srv.auth.LoginGuest("登记")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(testServer.URL, "http") + "/ws?token=" + loginResult.Token
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// handler 立即返回，登记应很快可见。
+	deadline := time.Now().Add(time.Second)
+	for srv.sessions.Count() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if srv.sessions.Count() != 1 {
+		t.Fatalf("期望登记 1 条连接，实际 %d", srv.sessions.Count())
+	}
+
+	_ = conn.Close()
+	deadline = time.Now().Add(time.Second)
+	for srv.sessions.Count() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if srv.sessions.Count() != 0 {
+		t.Fatalf("关闭后期望 0 连接，实际 %d", srv.sessions.Count())
+	}
+}

@@ -14,12 +14,14 @@ import (
 	"github.com/luanchang-zh/UNO-Server/internal/config"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
+	"github.com/luanchang-zh/UNO-Server/internal/session"
 )
 
 // Server 封装标准库 HTTP 服务。
 type Server struct {
 	cfg        config.Config
 	auth       *auth.Service
+	sessions   *session.Manager
 	httpServer *http.Server
 	logger     *logx.Logger
 }
@@ -32,17 +34,18 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger) *Ser
 
 	mux := http.NewServeMux()
 	srv := &Server{
-		cfg:    cfg,
-		auth:   authService,
-		logger: logger,
+		cfg:      cfg,
+		auth:     authService,
+		sessions: session.NewManager(logger),
+		logger:   logger,
 	}
 
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("POST /api/v1/auth/guest", srv.handleGuestLogin)
 	mux.HandleFunc("GET /ws", srv.handleWebSocket)
 
-	// 访问日志中间件包在最外层：每个 HTTP 请求结束只打一条日志。
-	// WebSocket 为长连接：不设 WriteTimeout/ReadTimeout，仅限制读 header，避免掐断存活连接。
+	// 访问日志中间件包在最外层：每个 HTTP 请求结束只打一条日志（WS 握手返回即记一条）。
+	// WebSocket 为长连接：不设 WriteTimeout/ReadTimeout，仅限制读 header。
 	srv.httpServer = &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           srv.withAccessLog(mux),
@@ -62,9 +65,11 @@ func (s *Server) Start() error {
 	return fmt.Errorf("listen and serve: %w", err)
 }
 
-// Shutdown 在超时时间内优雅关闭。
+// Shutdown 先断开全部 WebSocket，再在超时时间内优雅关闭 HTTP。
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.logger.WithContext(ctx).Info("HTTP 服务关闭中")
+	s.logger.WithContext(ctx).Info("HTTP 服务关闭中", "ws_connections", s.sessions.Count())
+	// 主动关闭在线连接，触发各自 Close → 断线日志 + Unregister。
+	s.sessions.CloseAll()
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		return fmt.Errorf("shutdown http server: %w", err)
 	}

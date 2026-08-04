@@ -74,12 +74,3 @@ func NewEnvelope(messageType, requestID string, payload any) (Envelope, error) {
 	envelope.Payload = raw
 	return envelope, nil
 }
-
-// MustEncode 编码消息；仅用于测试或确定不会失败的构造路径。
-func MustEncode(envelope Envelope) []byte {
-	data, err := Encode(envelope)
-	if err != nil {
-		panic(err)
-	}
-	return data
-}
