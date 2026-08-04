@@ -1,6 +1,9 @@
 package server
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -8,10 +11,12 @@ import (
 )
 
 // statusRecorder 捕获写入的 HTTP 状态码与响应体大小，供访问日志使用。
+// 实现 http.Hijacker，以便 WebSocket 升级能劫持底层连接。
 type statusRecorder struct {
 	http.ResponseWriter
 	statusCode   int
 	bytesWritten int
+	hijacked     bool
 }
 
 // WriteHeader 记录状态码后转交底层 ResponseWriter。
@@ -30,6 +35,20 @@ func (r *statusRecorder) Write(payload []byte) (int, error) {
 	return n, err
 }
 
+// Hijack 将连接控制权交给 WebSocket 升级逻辑。
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	r.hijacked = true
+	// 升级成功后 gorilla 会写 101；此处标记为 Switching Protocols 便于访问日志。
+	if r.statusCode == 0 {
+		r.statusCode = http.StatusSwitchingProtocols
+	}
+	return hijacker.Hijack()
+}
+
 // withAccessLog 为每个 HTTP 请求注入 trace_id，并在请求结束时只打一条访问日志。
 func (s *Server) withAccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -39,9 +58,14 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 		request = request.WithContext(ctx)
 
 		writer.Header().Set(logx.HeaderTraceID, traceID)
-		recorder := &statusRecorder{ResponseWriter: writer, statusCode: http.StatusOK}
+		recorder := &statusRecorder{ResponseWriter: writer, statusCode: 0}
 
 		next.ServeHTTP(recorder, request)
+
+		// 未写状态码且未劫持时，默认 200（部分 handler 只 Write body）。
+		if recorder.statusCode == 0 && !recorder.hijacked {
+			recorder.statusCode = http.StatusOK
+		}
 
 		duration := time.Since(startedAt)
 		fields := []any{
@@ -51,6 +75,9 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 			"duration_ms", duration.Milliseconds(),
 			"bytes", recorder.bytesWritten,
 			"remote", request.RemoteAddr,
+		}
+		if recorder.hijacked {
+			fields = append(fields, "hijacked", true)
 		}
 
 		contextLogger := s.logger.WithContext(ctx)

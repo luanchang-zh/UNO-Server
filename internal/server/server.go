@@ -39,13 +39,14 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger) *Ser
 
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("POST /api/v1/auth/guest", srv.handleGuestLogin)
+	mux.HandleFunc("GET /ws", srv.handleWebSocket)
 
 	// 访问日志中间件包在最外层：每个 HTTP 请求结束只打一条日志。
+	// WebSocket 为长连接：不设 WriteTimeout/ReadTimeout，仅限制读 header，避免掐断存活连接。
 	srv.httpServer = &http.Server{
-		Addr:         cfg.HTTPAddr,
-		Handler:      srv.withAccessLog(mux),
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		Addr:              cfg.HTTPAddr,
+		Handler:           srv.withAccessLog(mux),
+		ReadHeaderTimeout: cfg.ReadTimeout,
 	}
 
 	return srv
