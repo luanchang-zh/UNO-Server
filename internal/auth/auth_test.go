@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 )
 
 // TestLoginGuest_DefaultNickname 验证空昵称回落为默认「游客」。
@@ -52,7 +54,7 @@ func TestLoginGuest_NicknameTooLong(t *testing.T) {
 	service := NewService(Options{TokenTTL: time.Hour, MaxNicknameLen: 4})
 
 	_, err := service.LoginGuest("一二三四五")
-	if !errors.Is(err, ErrInvalidNickname) {
+	if !errors.Is(err, errs.ErrInvalidNickname) {
 		t.Fatalf("期望 ErrInvalidNickname，实际 %v", err)
 	}
 }
@@ -62,7 +64,7 @@ func TestAuthenticate_UnknownToken(t *testing.T) {
 	service := NewService(Options{TokenTTL: time.Hour})
 
 	_, err := service.Authenticate("not-exist")
-	if !errors.Is(err, ErrTokenNotFound) {
+	if !errors.Is(err, errs.ErrTokenNotFound) {
 		t.Fatalf("期望 ErrTokenNotFound，实际 %v", err)
 	}
 }
@@ -78,7 +80,7 @@ func TestAuthenticate_ExpiredToken(t *testing.T) {
 
 	time.Sleep(40 * time.Millisecond)
 	_, err = service.Authenticate(result.Token)
-	if !errors.Is(err, ErrTokenExpired) {
+	if !errors.Is(err, errs.ErrTokenExpired) {
 		t.Fatalf("期望 ErrTokenExpired，实际 %v", err)
 	}
 }
@@ -88,7 +90,7 @@ func TestLoginGuest_RejectControlChar(t *testing.T) {
 	service := NewService(Options{TokenTTL: time.Hour, MaxNicknameLen: 32})
 
 	_, err := service.LoginGuest("bad\nname")
-	if !errors.Is(err, ErrInvalidNickname) {
+	if !errors.Is(err, errs.ErrInvalidNickname) {
 		t.Fatalf("期望 ErrInvalidNickname，实际 %v", err)
 	}
 	if !strings.Contains(err.Error(), "非法字符") {

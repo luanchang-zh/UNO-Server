@@ -13,6 +13,7 @@ import (
 	"github.com/luanchang-zh/UNO-Server/internal/auth"
 	"github.com/luanchang-zh/UNO-Server/internal/config"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
+	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 )
 
 // Server 封装标准库 HTTP 服务。
@@ -95,18 +96,18 @@ type guestLoginResponse struct {
 func (s *Server) handleGuestLogin(writer http.ResponseWriter, request *http.Request) {
 	body, err := decodeGuestLoginRequest(request)
 	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json", "请求体不是合法 JSON")
+		writeError(writer, http.StatusBadRequest, errs.CodeInvalidJSON, "请求体不是合法 JSON")
 		return
 	}
 
 	result, err := s.auth.LoginGuest(body.Nickname)
 	if err != nil {
-		if errors.Is(err, auth.ErrInvalidNickname) {
-			writeError(writer, http.StatusBadRequest, "invalid_nickname", err.Error())
+		if errors.Is(err, errs.ErrInvalidNickname) {
+			writeError(writer, http.StatusBadRequest, errs.CodeInvalidNickname, err.Error())
 			return
 		}
 		// 非预期错误：仍只写响应；访问日志中间件会以 500 打 Error 级别一条。
-		writeError(writer, http.StatusInternalServerError, "internal_error", "登录失败")
+		writeError(writer, http.StatusInternalServerError, errs.CodeInternal, "登录失败")
 		return
 	}
 

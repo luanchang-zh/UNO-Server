@@ -1,42 +1,24 @@
 // Package auth 提供游客登录、token 签发与校验（当前为进程内内存实现）。
 //
-// 后续可将玩家落 MySQL、token 落 Redis，而不改动 HTTP 层调用方式。
+// 玩家实体见 model/entity；哨兵错误见 model/errs；后续 token 可落到 Redis（rediskey.Session）。
 package auth
 
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/luanchang-zh/UNO-Server/internal/model/entity"
+	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 )
 
-// 预定义业务错误，供 HTTP 层映射状态码。
-var (
-	// ErrInvalidNickname 表示昵称不合法。
-	ErrInvalidNickname = errors.New("invalid nickname")
-	// ErrTokenNotFound 表示 token 不存在或已失效。
-	ErrTokenNotFound = errors.New("token not found")
-	// ErrTokenExpired 表示 token 已过期。
-	ErrTokenExpired = errors.New("token expired")
-)
-
-// Player 表示已创建的玩家身份。
-type Player struct {
-	// ID 为玩家唯一标识，后续对应 MySQL players.id。
-	ID int64
-	// Nickname 为展示昵称，允许重名。
-	Nickname string
-	// CreatedAt 为首次创建时间（UTC）。
-	CreatedAt time.Time
-}
-
-// Session 表示一次登录会话（token 与玩家绑定）。
-type Session struct {
+// TokenSession 表示一次登录会话（token 与玩家绑定，非 MySQL 表；后续对应 Redis session）。
+type TokenSession struct {
 	// Token 为客户端持有的访问凭证。
 	Token string
 	// PlayerID 为绑定的玩家 ID。
@@ -49,7 +31,7 @@ type Session struct {
 
 // LoginResult 为游客登录成功后的返回值。
 type LoginResult struct {
-	Player    Player
+	Player    entity.Player
 	Token     string
 	ExpiresAt time.Time
 }
@@ -69,8 +51,8 @@ type Service struct {
 	nextPlayerID   atomic.Int64
 
 	mu       sync.RWMutex
-	players  map[int64]*Player
-	sessions map[string]*Session // token -> session
+	players  map[int64]*entity.Player
+	sessions map[string]*TokenSession // token -> session
 }
 
 // NewService 创建内存版鉴权服务。
@@ -85,8 +67,8 @@ func NewService(options Options) *Service {
 	service := &Service{
 		tokenTTL:       options.TokenTTL,
 		maxNicknameLen: options.MaxNicknameLen,
-		players:        make(map[int64]*Player),
-		sessions:       make(map[string]*Session),
+		players:        make(map[int64]*entity.Player),
+		sessions:       make(map[string]*TokenSession),
 	}
 	// 从 1 起分配，避免 0 被当成「未设置」。
 	service.nextPlayerID.Store(1)
@@ -106,13 +88,15 @@ func (s *Service) LoginGuest(nickname string) (LoginResult, error) {
 	}
 
 	now := time.Now().UTC()
-	player := &Player{
-		ID:        s.nextPlayerID.Add(1) - 1,
-		Nickname:  normalized,
-		CreatedAt: now,
+	player := &entity.Player{
+		ID:          s.nextPlayerID.Add(1) - 1,
+		Nickname:    normalized,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		LastLoginAt: now,
 	}
 	expiresAt := now.Add(s.tokenTTL)
-	session := &Session{
+	session := &TokenSession{
 		Token:     token,
 		PlayerID:  player.ID,
 		Nickname:  player.Nickname,
@@ -132,24 +116,24 @@ func (s *Service) LoginGuest(nickname string) (LoginResult, error) {
 }
 
 // Authenticate 校验 token，成功返回对应会话；过期 token 会被清理。
-func (s *Service) Authenticate(token string) (Session, error) {
+func (s *Service) Authenticate(token string) (TokenSession, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return Session{}, ErrTokenNotFound
+		return TokenSession{}, errs.ErrTokenNotFound
 	}
 
 	s.mu.RLock()
 	session, ok := s.sessions[token]
 	s.mu.RUnlock()
 	if !ok {
-		return Session{}, ErrTokenNotFound
+		return TokenSession{}, errs.ErrTokenNotFound
 	}
 
 	if time.Now().UTC().After(session.ExpiresAt) {
 		s.mu.Lock()
 		delete(s.sessions, token)
 		s.mu.Unlock()
-		return Session{}, ErrTokenExpired
+		return TokenSession{}, errs.ErrTokenExpired
 	}
 
 	return *session, nil
@@ -162,12 +146,12 @@ func (s *Service) normalizeNickname(nickname string) (string, error) {
 		return "游客", nil
 	}
 	if utf8.RuneCountInString(normalized) > s.maxNicknameLen {
-		return "", fmt.Errorf("%w: 长度不能超过 %d 个字符", ErrInvalidNickname, s.maxNicknameLen)
+		return "", fmt.Errorf("%w: 长度不能超过 %d 个字符", errs.ErrInvalidNickname, s.maxNicknameLen)
 	}
 	// 拒绝控制字符，避免日志与展示异常。
 	for _, runeValue := range normalized {
 		if runeValue < 32 || runeValue == 127 {
-			return "", fmt.Errorf("%w: 包含非法字符", ErrInvalidNickname)
+			return "", fmt.Errorf("%w: 包含非法字符", errs.ErrInvalidNickname)
 		}
 	}
 	return normalized, nil
