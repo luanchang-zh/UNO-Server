@@ -43,12 +43,14 @@ func (s *Server) handleWebSocket(writer http.ResponseWriter, request *http.Reque
 	}
 
 	playerSession, err := session.New(session.Options{
-		ID:       logx.NewTraceID(),
-		PlayerID: authSession.PlayerID,
-		Nickname: authSession.Nickname,
-		Conn:     conn,
-		Logger:   s.logger,
-		Manager:  s.sessions,
+		ID:        logx.NewTraceID(),
+		PlayerID:  authSession.PlayerID,
+		Nickname:  authSession.Nickname,
+		Conn:      conn,
+		Logger:    s.logger,
+		Manager:   s.sessions,
+		Router:    s.rooms,
+		CloseHook: s.rooms,
 	})
 	if err != nil {
 		_ = conn.Close()

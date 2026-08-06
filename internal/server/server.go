@@ -14,6 +14,7 @@ import (
 	"github.com/luanchang-zh/UNO-Server/internal/config"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
+	"github.com/luanchang-zh/UNO-Server/internal/room"
 	"github.com/luanchang-zh/UNO-Server/internal/session"
 )
 
@@ -22,6 +23,7 @@ type Server struct {
 	cfg        config.Config
 	auth       *auth.Service
 	sessions   *session.Manager
+	rooms      *room.Manager
 	httpServer *http.Server
 	logger     *logx.Logger
 }
@@ -37,6 +39,7 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger) *Ser
 		cfg:      cfg,
 		auth:     authService,
 		sessions: session.NewManager(logger),
+		rooms:    room.NewManager(logger),
 		logger:   logger,
 	}
 

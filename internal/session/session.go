@@ -25,6 +25,16 @@ const (
 	maxMessageSize = 4 << 10
 )
 
+// InboundRouter 将非内建消息（非 ping）路由到业务层（如房间）。
+type InboundRouter interface {
+	Route(ctx context.Context, playerSession *Session, envelope protocol.Envelope) error
+}
+
+// CloseHook 会话关闭时的回调（如离开房间）。
+type CloseHook interface {
+	OnSessionClose(playerSession *Session)
+}
+
 // Session 表示一条已鉴权的 WebSocket 连接。
 type Session struct {
 	// ID 连接级唯一标识。
@@ -38,6 +48,8 @@ type Session struct {
 	send        chan []byte
 	logger      *logx.Logger
 	manager     *Manager
+	router      InboundRouter
+	closeHook   CloseHook
 	remoteAddr  string
 	connectedAt time.Time
 
@@ -59,6 +71,10 @@ type Options struct {
 	Logger *logx.Logger
 	// Manager 可选，非空时自动 Register，Close 时 Unregister。
 	Manager *Manager
+	// Router 可选，处理房间等业务消息。
+	Router InboundRouter
+	// CloseHook 可选，断线时通知业务层。
+	CloseHook CloseHook
 }
 
 // New 创建会话、登记 Manager（若有）并启动读写泵。
@@ -87,6 +103,8 @@ func New(options Options) (*Session, error) {
 		send:        make(chan []byte, sendBufferSize),
 		logger:      options.Logger,
 		manager:     options.Manager,
+		router:      options.Router,
+		closeHook:   options.CloseHook,
 		remoteAddr:  remoteAddr,
 		connectedAt: time.Now(),
 		closed:      make(chan struct{}),
@@ -140,6 +158,9 @@ func (s *Session) Close() {
 
 		if s.manager != nil {
 			s.manager.Unregister(s.ID)
+		}
+		if s.closeHook != nil {
+			s.closeHook.OnSessionClose(s)
 		}
 
 		// 断线日志：覆盖整段在线时长（与握手访问日志成对）。
@@ -230,9 +251,16 @@ func (s *Session) handleInbound(ctx context.Context, payload []byte) {
 			result = "error"
 		}
 	default:
-		handleErr = fmt.Errorf("unknown type %q: %w", envelope.Type, errs.ErrInvalidArgument)
-		result = "unknown_type"
-		_ = s.sendError(envelope.RequestID, errs.CodeInvalidArgument, "未知消息类型: "+envelope.Type)
+		if s.router == nil {
+			handleErr = fmt.Errorf("unknown type %q: %w", envelope.Type, errs.ErrInvalidArgument)
+			result = "unknown_type"
+			_ = s.sendError(envelope.RequestID, errs.CodeInvalidArgument, "未知消息类型: "+envelope.Type)
+			return
+		}
+		handleErr = s.router.Route(ctx, s, envelope)
+		if handleErr != nil {
+			result = "error"
+		}
 	}
 }
 
