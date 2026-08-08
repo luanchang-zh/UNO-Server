@@ -75,4 +75,9 @@ const (
 	CodeNotYourTurn      = "not_your_turn"
 	CodeIllegalCard      = "illegal_card"
 	CodeGameNotPlaying   = "game_not_playing"
+	CodeCardNotFound     = "card_not_found"
+	CodeActionNotAllowed = "action_not_allowed"
+	CodeInvalidColor     = "invalid_color"
+	CodeNoUNOChallenge   = "no_uno_challenge"
+	CodeCannotCatchSelf  = "cannot_catch_self"
 )
