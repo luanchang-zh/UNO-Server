@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
@@ -16,24 +17,57 @@ import (
 	"github.com/luanchang-zh/UNO-Server/internal/session"
 )
 
+const (
+	defaultTurnTimeout        = 20 * time.Second
+	defaultManagedActionDelay = 200 * time.Millisecond
+	defaultTimeoutStrikeLimit = 2
+)
+
+// Options 控制房间回合计时和自动托管行为。
+type Options struct {
+	// TurnTimeout 是连接中玩家一次手动行动的等待上限。
+	TurnTimeout time.Duration
+	// ManagedActionDelay 是托管玩家两次自动行动之间的最小间隔。
+	ManagedActionDelay time.Duration
+	// TimeoutStrikeLimit 是连续超时多少次后进入托管。
+	TimeoutStrikeLimit int
+}
+
 // Manager 管理全部房间，并作为 Session 的入站路由实现。
 type Manager struct {
 	mu         sync.RWMutex
 	rooms      map[string]*Room
 	playerRoom map[int64]string // 玩家 ID 到房间 ID 的索引
 	logger     *logx.Logger
+	options    Options
 }
 
 // NewManager 创建房间管理器。
-func NewManager(logger *logx.Logger) *Manager {
+func NewManager(logger *logx.Logger, options Options) *Manager {
 	if logger == nil {
 		logger = logx.NewFromSlog(nil)
 	}
+	options = normalizeOptions(options)
 	return &Manager{
 		rooms:      make(map[string]*Room),
 		playerRoom: make(map[int64]string),
 		logger:     logger,
+		options:    options,
 	}
+}
+
+// normalizeOptions 为未设置的房间运行参数填充安全默认值。
+func normalizeOptions(options Options) Options {
+	if options.TurnTimeout <= 0 {
+		options.TurnTimeout = defaultTurnTimeout
+	}
+	if options.ManagedActionDelay <= 0 {
+		options.ManagedActionDelay = defaultManagedActionDelay
+	}
+	if options.TimeoutStrikeLimit <= 0 {
+		options.TimeoutStrikeLimit = defaultTimeoutStrikeLimit
+	}
+	return options
 }
 
 // Route 实现 session.InboundRouter：处理房间类消息。
@@ -52,7 +86,26 @@ func (m *Manager) Route(ctx context.Context, playerSession *session.Session, env
 	}
 }
 
-// OnSessionClose 连接断开时从所在房间移除并清理索引。
+// OnSessionOpen 在新连接鉴权后尝试换绑玩家仍保留的房间座位。
+func (m *Manager) OnSessionOpen(playerSession *session.Session) error {
+	if playerSession == nil {
+		return nil
+	}
+	m.mu.RLock()
+	roomID, found := m.playerRoom[playerSession.PlayerID]
+	target := m.rooms[roomID]
+	m.mu.RUnlock()
+	if !found {
+		return nil
+	}
+	if target == nil {
+		m.clearPlayerRoom(roomID, playerSession.PlayerID)
+		return nil
+	}
+	return target.submitSync(context.Background(), commandReconnect, playerSession, protocol.Envelope{})
+}
+
+// OnSessionClose 将断线事件交给房间；是否保留座位由房间阶段决定。
 func (m *Manager) OnSessionClose(playerSession *session.Session) {
 	if playerSession == nil {
 		return
@@ -65,15 +118,13 @@ func (m *Manager) OnSessionClose(playerSession *session.Session) {
 	}
 	m.mu.RUnlock()
 	if target == nil {
+		if ok {
+			m.clearPlayerRoom(roomID, playerSession.PlayerID)
+		}
 		return
 	}
-	// 同步移除，避免索引与成员列表短暂不一致。
+	// 同步处理，避免断线后的座位状态与索引短暂不一致。
 	_ = target.submitSync(context.Background(), commandDisconnect, playerSession, protocol.Envelope{})
-	m.mu.Lock()
-	if m.playerRoom[playerSession.PlayerID] == roomID {
-		delete(m.playerRoom, playerSession.PlayerID)
-	}
-	m.mu.Unlock()
 }
 
 // handleCreateRoom 创建房间并将创建者设为房主。
@@ -101,7 +152,7 @@ func (m *Manager) handleCreateRoom(ctx context.Context, playerSession *session.S
 		return m.sendError(playerSession, envelope.RequestID, errs.CodeInternal, "分配房间号失败")
 	}
 
-	created := newRoom(roomID, maxPlayers, playerSession, m.logger, roomHooks{
+	created := newRoom(roomID, maxPlayers, playerSession, m.logger, m.options, roomHooks{
 		onEmpty:         m.removeRoom,
 		onMemberRemoved: m.clearPlayerRoom,
 	})
@@ -124,10 +175,11 @@ func mustRoomStateEnvelope(roomID string, maxPlayers int, ownerID int64, owner *
 		MaxPlayers: maxPlayers,
 		OwnerID:    ownerID,
 		Members: []protocol.RoomMemberView{{
-			PlayerID: owner.PlayerID,
-			Nickname: owner.Nickname,
-			Ready:    true,
-			IsOwner:  true,
+			PlayerID:  owner.PlayerID,
+			Nickname:  owner.Nickname,
+			Ready:     true,
+			IsOwner:   true,
+			Connected: true,
 		}},
 	})
 	if err != nil {

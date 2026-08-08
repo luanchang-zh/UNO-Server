@@ -20,7 +20,7 @@ import (
 const (
 	// PhaseWaiting 等待准备。
 	PhaseWaiting = "waiting"
-	// PhasePlaying 对局中（M1 仅占位，未挂引擎）。
+	// PhasePlaying 表示规则引擎已经挂载且对局正在进行。
 	PhasePlaying = "playing"
 	// PhaseSettled 已结算。
 	PhaseSettled = "settled"
@@ -39,21 +39,45 @@ const (
 
 // Member 房间内一名玩家。
 type Member struct {
+	// PlayerID 是成员稳定身份。
 	PlayerID int64
+	// Nickname 是成员显示昵称。
 	Nickname string
-	Ready    bool
-	Session  *session.Session
+	// Ready 表示成员是否满足开局准备条件。
+	Ready bool
+	// Connected 表示成员当前是否绑定有效会话。
+	Connected bool
+	// AutoPlay 表示成员是否由服务端自动托管。
+	AutoPlay bool
+	// TimeoutStrikes 记录成员当前连续超时次数。
+	TimeoutStrikes int
+	// Session 是当前有效连接；断线或主动离局托管时为 nil。
+	Session *session.Session
+	// abandoned 表示玩家主动离开，不能再通过重连回到本局。
+	abandoned bool
 }
 
 // Room 是对局容器：成员与阶段在 mailbox 协程内串行修改。
 type Room struct {
-	ID         string
+	// ID 是房间唯一编号。
+	ID string
+	// MaxPlayers 是本房间允许的最大成员数。
 	MaxPlayers int
-	OwnerID    int64
-	Phase      string
-	Members    []*Member
+	// OwnerID 是当前房主玩家 ID。
+	OwnerID int64
+	// Phase 是 waiting、playing 或 settled。
+	Phase string
+	// Members 按稳定座位顺序保存成员；对局期间不会移除引擎座位。
+	Members []*Member
 	// engine 仅在 playing 或 settled 阶段存在，并且只由 mailbox 协程访问。
 	engine *uno.Engine
+	// 回合计时器只负责投递带版本号的事件，绝不直接修改房间状态。
+	turnTimer          *time.Timer
+	turnToken          uint64
+	turnDeadline       time.Time
+	turnTimeout        time.Duration
+	managedActionDelay time.Duration
+	timeoutStrikeLimit int
 
 	mailbox chan roomCommand
 	closed  chan struct{}
@@ -69,11 +93,12 @@ type Room struct {
 
 // roomCommand 进入 mailbox 的串行命令。
 type roomCommand struct {
-	ctx      context.Context
-	session  *session.Session
-	envelope protocol.Envelope
-	kind     commandKind
-	done     chan error // 可选，同步等待结果（测试用）
+	ctx        context.Context
+	session    *session.Session
+	envelope   protocol.Envelope
+	kind       commandKind
+	timerToken uint64
+	done       chan error // 可选，同步等待结果（测试用）
 }
 
 // commandKind 命令类型。
@@ -83,6 +108,9 @@ const (
 	commandMessage commandKind = iota
 	commandJoin
 	commandDisconnect
+	commandReconnect
+	commandTurnTimeout
+	commandAutoPlay
 	commandStop
 )
 
@@ -93,7 +121,14 @@ type roomHooks struct {
 }
 
 // newRoom 创建房间并启动 mailbox 循环。
-func newRoom(id string, maxPlayers int, owner *session.Session, logger *logx.Logger, hooks roomHooks) *Room {
+func newRoom(
+	id string,
+	maxPlayers int,
+	owner *session.Session,
+	logger *logx.Logger,
+	options Options,
+	hooks roomHooks,
+) *Room {
 	if maxPlayers < minPlayers || maxPlayers > maxPlayersCap {
 		maxPlayers = defaultMaxPlayers
 	}
@@ -107,16 +142,20 @@ func newRoom(id string, maxPlayers int, owner *session.Session, logger *logx.Log
 		OwnerID:    owner.PlayerID,
 		Phase:      PhaseWaiting,
 		Members: []*Member{{
-			PlayerID: owner.PlayerID,
-			Nickname: owner.Nickname,
-			Ready:    true, // 房主默认已准备
-			Session:  owner,
+			PlayerID:  owner.PlayerID,
+			Nickname:  owner.Nickname,
+			Ready:     true, // 房主默认已准备
+			Connected: true,
+			Session:   owner,
 		}},
-		mailbox:         make(chan roomCommand, mailboxSize),
-		closed:          make(chan struct{}),
-		logger:          logger,
-		onEmpty:         hooks.onEmpty,
-		onMemberRemoved: hooks.onMemberRemoved,
+		mailbox:            make(chan roomCommand, mailboxSize),
+		closed:             make(chan struct{}),
+		logger:             logger,
+		turnTimeout:        options.TurnTimeout,
+		managedActionDelay: options.ManagedActionDelay,
+		timeoutStrikeLimit: options.TimeoutStrikeLimit,
+		onEmpty:            hooks.onEmpty,
+		onMemberRemoved:    hooks.onMemberRemoved,
 	}
 	go room.loop()
 	return room
@@ -129,12 +168,17 @@ func (r *Room) loop() {
 		var err error
 		switch cmd.kind {
 		case commandStop:
+			r.cancelTurnTimer()
 			if cmd.done != nil {
 				cmd.done <- nil
 			}
 			return
 		case commandDisconnect:
 			r.handleDisconnect(cmd.session)
+		case commandReconnect:
+			err = r.tryReconnect(cmd.session)
+		case commandTurnTimeout, commandAutoPlay:
+			r.handleAutomatedTurn(cmd.kind, cmd.timerToken)
 		case commandJoin:
 			err = r.tryJoin(cmd.session)
 		case commandMessage:
@@ -183,6 +227,10 @@ func (r *Room) submitSync(ctx context.Context, kind commandKind, playerSession *
 // handleMessage 处理房间内业务消息。
 func (r *Room) handleMessage(ctx context.Context, playerSession *session.Session, envelope protocol.Envelope) error {
 	_ = ctx
+	member := r.findMember(playerSession.PlayerID)
+	if member == nil || member.Session != playerSession || !member.Connected {
+		return r.replyError(playerSession, envelope.RequestID, errs.CodeNotInRoom, "当前连接未绑定房间座位")
+	}
 	switch envelope.Type {
 	case protocol.TypeReady:
 		return r.handleReady(playerSession, envelope)
@@ -251,6 +299,7 @@ func (r *Room) handleStart(playerSession *session.Session, envelope protocol.Env
 	}
 	r.engine = engine
 	r.Phase = PhasePlaying
+	r.scheduleTurnTimer()
 	r.broadcastState()
 	r.broadcastGameState()
 	return nil
@@ -259,6 +308,10 @@ func (r *Room) handleStart(playerSession *session.Session, envelope protocol.Env
 // handleLeave 主动离开。
 func (r *Room) handleLeave(playerSession *session.Session, envelope protocol.Envelope) error {
 	_ = envelope
+	if r.Phase == PhasePlaying {
+		r.abandonMember(playerSession.PlayerID)
+		return nil
+	}
 	r.removeMember(playerSession.PlayerID)
 	return nil
 }
@@ -288,14 +341,6 @@ func (r *Room) handleKick(playerSession *session.Session, envelope protocol.Enve
 	return nil
 }
 
-// handleDisconnect 连接断开：从房间移除。
-func (r *Room) handleDisconnect(playerSession *session.Session) {
-	if playerSession == nil {
-		return
-	}
-	r.removeMember(playerSession.PlayerID)
-}
-
 // tryJoin 在房间协程内加入成员（由 Manager 经 submitSync 调用）。
 func (r *Room) tryJoin(playerSession *session.Session) error {
 	if r.Phase != PhaseWaiting {
@@ -308,10 +353,11 @@ func (r *Room) tryJoin(playerSession *session.Session) error {
 		return errs.ErrRoomFull
 	}
 	r.Members = append(r.Members, &Member{
-		PlayerID: playerSession.PlayerID,
-		Nickname: playerSession.Nickname,
-		Ready:    false,
-		Session:  playerSession,
+		PlayerID:  playerSession.PlayerID,
+		Nickname:  playerSession.Nickname,
+		Ready:     false,
+		Connected: true,
+		Session:   playerSession,
 	})
 	r.broadcastState()
 	return nil
@@ -386,10 +432,13 @@ func (r *Room) buildStatePayload() protocol.RoomStatePayload {
 	members := make([]protocol.RoomMemberView, 0, len(r.Members))
 	for _, member := range r.Members {
 		members = append(members, protocol.RoomMemberView{
-			PlayerID: member.PlayerID,
-			Nickname: member.Nickname,
-			Ready:    member.Ready,
-			IsOwner:  member.PlayerID == r.OwnerID,
+			PlayerID:       member.PlayerID,
+			Nickname:       member.Nickname,
+			Ready:          member.Ready,
+			IsOwner:        member.PlayerID == r.OwnerID,
+			Connected:      member.Connected,
+			AutoPlay:       member.AutoPlay,
+			TimeoutStrikes: member.TimeoutStrikes,
 		})
 	}
 	return protocol.RoomStatePayload{

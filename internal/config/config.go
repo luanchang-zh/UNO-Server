@@ -22,6 +22,12 @@ type Config struct {
 	TokenTTL time.Duration
 	// MaxNicknameLen 为昵称最大字符数（按 Unicode 字符计）。
 	MaxNicknameLen int
+	// TurnTimeout 为当前玩家一次手动行动的最长等待时间。
+	TurnTimeout time.Duration
+	// ManagedActionDelay 为托管玩家连续自动行动之间的最小间隔。
+	ManagedActionDelay time.Duration
+	// TimeoutStrikeLimit 为玩家连续超时多少次后进入托管。
+	TimeoutStrikeLimit int
 }
 
 // Load 从环境变量读取配置，未设置时使用本地开发默认值。
@@ -33,6 +39,12 @@ func Load() Config {
 		ShutdownTimeout: envDurationOrDefault("UNO_SHUTDOWN_TIMEOUT", 10*time.Second),
 		TokenTTL:        envDurationOrDefault("UNO_TOKEN_TTL", 24*time.Hour),
 		MaxNicknameLen:  envIntOrDefault("UNO_MAX_NICKNAME_LEN", 32),
+		TurnTimeout:     envDurationOrDefault("UNO_TURN_TIMEOUT", 20*time.Second),
+		ManagedActionDelay: envDurationOrDefault(
+			"UNO_MANAGED_ACTION_DELAY",
+			200*time.Millisecond,
+		),
+		TimeoutStrikeLimit: envIntOrDefault("UNO_TIMEOUT_STRIKE_LIMIT", 2),
 	}
 }
 
@@ -49,6 +61,15 @@ func (c Config) Validate() error {
 	}
 	if c.MaxNicknameLen <= 0 {
 		return fmt.Errorf("MaxNicknameLen 必须大于 0")
+	}
+	if c.TurnTimeout <= 0 {
+		return fmt.Errorf("TurnTimeout 必须大于 0")
+	}
+	if c.ManagedActionDelay <= 0 {
+		return fmt.Errorf("ManagedActionDelay 必须大于 0")
+	}
+	if c.TimeoutStrikeLimit <= 0 {
+		return fmt.Errorf("TimeoutStrikeLimit 必须大于 0")
 	}
 	return nil
 }

@@ -213,6 +213,17 @@ func assertUNOChallenge(t *testing.T, view uno.View, targetID int64) {
 
 // readGameState 忽略同一连接上的其他广播，读取下一条牌局全量视图。
 func readGameState(t *testing.T, conn *websocket.Conn) uno.View {
+	return readGameStateWithDeadline(t, conn).View
+}
+
+// testGameStatePayload 同时解析房间层附加的回合截止时间。
+type testGameStatePayload struct {
+	uno.View
+	TurnDeadline time.Time `json:"turn_deadline"`
+}
+
+// readGameStateWithDeadline 读取带房间回合截止时间的牌局视图。
+func readGameStateWithDeadline(t *testing.T, conn *websocket.Conn) testGameStatePayload {
 	t.Helper()
 	for index := 0; index < 10; index++ {
 		envelope := readEnvelope(t, conn)
@@ -222,14 +233,14 @@ func readGameState(t *testing.T, conn *websocket.Conn) uno.View {
 		if envelope.Type != protocol.TypeGameState {
 			continue
 		}
-		var view uno.View
-		if err := json.Unmarshal(envelope.Payload, &view); err != nil {
+		var payload testGameStatePayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 			t.Fatalf("解析 game_state 失败：%v", err)
 		}
-		return view
+		return payload
 	}
 	t.Fatal("未收到 game_state")
-	return uno.View{}
+	return testGameStatePayload{}
 }
 
 // readProtocolError 读取下一条协议错误消息。

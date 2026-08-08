@@ -142,8 +142,8 @@ func (s *Session) Send(data []byte) error {
 	case s.send <- data:
 		return nil
 	default:
-		// 背压：出站阻塞视为客户端过慢，主动断开。
-		s.Close()
+		// 背压：异步断开慢客户端，避免业务 actor 在关闭回调中同步回投自身而死锁。
+		go s.Close()
 		return fmt.Errorf("send buffer full: %w", errs.ErrInternal)
 	}
 }

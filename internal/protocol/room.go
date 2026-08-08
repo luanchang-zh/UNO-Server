@@ -44,10 +44,20 @@ type KickPayload struct {
 
 // RoomMemberView 房间成员公开视图。
 type RoomMemberView struct {
-	PlayerID int64  `json:"player_id"`
+	// PlayerID 是成员的稳定玩家 ID。
+	PlayerID int64 `json:"player_id"`
+	// Nickname 是成员显示昵称。
 	Nickname string `json:"nickname"`
-	Ready    bool   `json:"ready"`
-	IsOwner  bool   `json:"is_owner"`
+	// Ready 表示成员是否满足开局准备条件。
+	Ready bool `json:"ready"`
+	// IsOwner 表示成员是否为当前房主。
+	IsOwner bool `json:"is_owner"`
+	// Connected 表示成员当前是否绑定有效 WebSocket 会话。
+	Connected bool `json:"connected"`
+	// AutoPlay 表示成员当前是否由服务端自动托管。
+	AutoPlay bool `json:"auto_play"`
+	// TimeoutStrikes 是成员当前连续超时次数。
+	TimeoutStrikes int `json:"timeout_strikes"`
 }
 
 // RoomStatePayload 房间状态推送体。

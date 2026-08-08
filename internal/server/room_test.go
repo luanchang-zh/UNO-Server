@@ -90,7 +90,13 @@ func dialPlayerWithID(t *testing.T, testServer *httptest.Server, authService *au
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	wsURL := "ws" + strings.TrimPrefix(testServer.URL, "http") + "/ws?token=" + result.Token
+	return dialPlayerWithToken(t, testServer, result.Token), result.Player.ID
+}
+
+// dialPlayerWithToken 使用已有 token 建立 WebSocket，供断线重连测试复用身份。
+func dialPlayerWithToken(t *testing.T, testServer *httptest.Server, token string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(testServer.URL, "http") + "/ws?token=" + token
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -98,7 +104,7 @@ func dialPlayerWithID(t *testing.T, testServer *httptest.Server, authService *au
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
-	return conn, result.Player.ID
+	return conn
 }
 
 // writeWS 发送 WebSocket 协议消息。

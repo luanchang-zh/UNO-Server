@@ -39,8 +39,12 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger) *Ser
 		cfg:      cfg,
 		auth:     authService,
 		sessions: session.NewManager(logger),
-		rooms:    room.NewManager(logger),
-		logger:   logger,
+		rooms: room.NewManager(logger, room.Options{
+			TurnTimeout:        cfg.TurnTimeout,
+			ManagedActionDelay: cfg.ManagedActionDelay,
+			TimeoutStrikeLimit: cfg.TimeoutStrikeLimit,
+		}),
+		logger: logger,
 	}
 
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)

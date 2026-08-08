@@ -62,6 +62,14 @@ func (s *Server) handleWebSocket(writer http.ResponseWriter, request *http.Reque
 		playerSession.Close()
 		return
 	}
+	if err := s.rooms.OnSessionOpen(playerSession); err != nil {
+		// 重连换绑失败不关闭基础连接，玩家仍可收到明确错误后重新选择操作。
+		s.logger.WithContext(request.Context()).Warn(
+			"websocket room rebind failed",
+			"player_id", playerSession.PlayerID,
+			"error", err,
+		)
+	}
 	// 不再阻塞等待 Done；连接由泵与 Shutdown→CloseAll 管理。
 }
 

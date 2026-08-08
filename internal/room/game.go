@@ -4,12 +4,20 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/luanchang-zh/UNO-Server/internal/game/uno"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 	"github.com/luanchang-zh/UNO-Server/internal/protocol"
 	"github.com/luanchang-zh/UNO-Server/internal/session"
 )
+
+// gameStatePayload 在引擎安全视图上附加房间层维护的当前行动截止时间。
+type gameStatePayload struct {
+	uno.View
+	// TurnDeadline 是当前手动或托管行动事件的 UTC 截止时间。
+	TurnDeadline *time.Time `json:"turn_deadline,omitempty"`
+}
 
 // handleGameCommand 在房间唯一写协程内校验并执行一条牌局命令。
 func (r *Room) handleGameCommand(playerSession *session.Session, envelope protocol.Envelope) error {
@@ -18,6 +26,7 @@ func (r *Room) handleGameCommand(playerSession *session.Session, envelope protoc
 	}
 
 	var commandErr error
+	turnAction := true
 	switch envelope.Type {
 	case protocol.TypePlayCard:
 		var payload protocol.PlayCardPayload
@@ -37,8 +46,10 @@ func (r *Room) handleGameCommand(playerSession *session.Session, envelope protoc
 		color := uno.Color(strings.ToLower(strings.TrimSpace(payload.Color)))
 		commandErr = r.engine.ChooseColor(playerSession.PlayerID, color)
 	case protocol.TypeCallUNO:
+		turnAction = false
 		commandErr = r.engine.CallUNO(playerSession.PlayerID)
 	case protocol.TypeCatchUNO:
+		turnAction = false
 		var payload protocol.CatchUNOPayload
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil || payload.PlayerID <= 0 {
 			return r.replyError(playerSession, envelope.RequestID, errs.CodeInvalidArgument, "catch_uno payload 非法")
@@ -52,18 +63,34 @@ func (r *Room) handleGameCommand(playerSession *session.Session, envelope protoc
 		code, message := mapGameError(commandErr)
 		return r.replyError(playerSession, envelope.RequestID, code, message)
 	}
-	return r.finishGameCommand(playerSession, envelope.RequestID)
+	return r.finishGameCommand(playerSession, envelope.RequestID, turnAction)
 }
 
 // finishGameCommand 在成功命令后同步房间阶段，并向每名成员广播其专属视图。
-func (r *Room) finishGameCommand(playerSession *session.Session, requestID string) error {
+func (r *Room) finishGameCommand(playerSession *session.Session, requestID string, turnAction bool) error {
 	requesterView, err := r.engine.ViewFor(playerSession.PlayerID)
 	if err != nil {
 		return r.replyError(playerSession, requestID, errs.CodeInternal, "生成牌局视图失败")
 	}
+	roomStateChanged := false
+	if turnAction {
+		member := r.findMember(playerSession.PlayerID)
+		if member != nil && (member.TimeoutStrikes != 0 || member.AutoPlay) {
+			member.TimeoutStrikes = 0
+			member.AutoPlay = false
+			roomStateChanged = true
+		}
+	}
 	if requesterView.Phase == uno.PhaseFinished {
 		r.Phase = PhaseSettled
+		r.cancelTurnTimer()
+		roomStateChanged = true
+	}
+	if roomStateChanged {
 		r.broadcastState()
+	}
+	if turnAction && r.Phase == PhasePlaying {
+		r.scheduleTurnTimer()
 	}
 	r.broadcastGameState()
 	return nil
@@ -75,19 +102,30 @@ func (r *Room) broadcastGameState() {
 		return
 	}
 	for _, member := range r.Members {
-		if member.Session == nil {
-			continue
-		}
-		view, err := r.engine.ViewFor(member.PlayerID)
-		if err != nil {
-			continue
-		}
-		envelope, err := protocol.NewEnvelope(protocol.TypeGameState, "", view)
-		if err != nil {
-			continue
-		}
-		_ = member.Session.SendEnvelope(envelope)
+		r.sendGameStateTo(member)
 	}
+}
+
+// sendGameStateTo 仅向指定在线成员发送其专属的牌局全量视图。
+func (r *Room) sendGameStateTo(member *Member) {
+	if r.engine == nil || member == nil || member.Session == nil || !member.Connected {
+		return
+	}
+	view, err := r.engine.ViewFor(member.PlayerID)
+	if err != nil {
+		return
+	}
+	payload := gameStatePayload{View: view}
+	if !r.turnDeadline.IsZero() {
+		// 使用指针让终局状态真正省略截止时间，避免下发公元元年的零值时间。
+		deadline := r.turnDeadline
+		payload.TurnDeadline = &deadline
+	}
+	envelope, err := protocol.NewEnvelope(protocol.TypeGameState, "", payload)
+	if err != nil {
+		return
+	}
+	_ = member.Session.SendEnvelope(envelope)
 }
 
 // mapGameError 将规则引擎错误转换为稳定的客户端错误码和中文提示。

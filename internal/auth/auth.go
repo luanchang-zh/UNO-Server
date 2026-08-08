@@ -52,7 +52,7 @@ type Service struct {
 
 	mu       sync.RWMutex
 	players  map[int64]*entity.Player
-	sessions map[string]*TokenSession // token -> session
+	sessions map[string]*TokenSession // token 到会话的索引
 }
 
 // NewService 创建内存版鉴权服务。
