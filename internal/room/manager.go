@@ -43,7 +43,9 @@ func (m *Manager) Route(ctx context.Context, playerSession *session.Session, env
 		return m.handleCreateRoom(ctx, playerSession, envelope)
 	case protocol.TypeJoinRoom:
 		return m.handleJoinRoom(ctx, playerSession, envelope)
-	case protocol.TypeLeaveRoom, protocol.TypeReady, protocol.TypeStart, protocol.TypeKick:
+	case protocol.TypeLeaveRoom, protocol.TypeReady, protocol.TypeStart, protocol.TypeKick,
+		protocol.TypePlayCard, protocol.TypeDrawCard, protocol.TypePass,
+		protocol.TypeChooseColor, protocol.TypeCallUNO, protocol.TypeCatchUNO:
 		return m.forwardToPlayerRoom(ctx, playerSession, envelope)
 	default:
 		return fmt.Errorf("unknown type %q: %w", envelope.Type, errs.ErrInvalidArgument)

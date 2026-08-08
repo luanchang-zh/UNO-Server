@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luanchang-zh/UNO-Server/internal/game/uno"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 	"github.com/luanchang-zh/UNO-Server/internal/protocol"
@@ -51,6 +52,8 @@ type Room struct {
 	OwnerID    int64
 	Phase      string
 	Members    []*Member
+	// engine 仅在 playing 或 settled 阶段存在，并且只由 mailbox 协程访问。
+	engine *uno.Engine
 
 	mailbox chan roomCommand
 	closed  chan struct{}
@@ -189,6 +192,9 @@ func (r *Room) handleMessage(ctx context.Context, playerSession *session.Session
 		return r.handleLeave(playerSession, envelope)
 	case protocol.TypeKick:
 		return r.handleKick(playerSession, envelope)
+	case protocol.TypePlayCard, protocol.TypeDrawCard, protocol.TypePass,
+		protocol.TypeChooseColor, protocol.TypeCallUNO, protocol.TypeCatchUNO:
+		return r.handleGameCommand(playerSession, envelope)
 	default:
 		return fmt.Errorf("unsupported in room: %s: %w", envelope.Type, errs.ErrInvalidArgument)
 	}
@@ -219,7 +225,7 @@ func (r *Room) handleReady(playerSession *session.Session, envelope protocol.Env
 	return nil
 }
 
-// handleStart 房主开局（M1 仅切换 phase，不发牌）。
+// handleStart 校验开局门槛，并按当前座位顺序创建和广播一局 UNO 引擎。
 func (r *Room) handleStart(playerSession *session.Session, envelope protocol.Envelope) error {
 	if playerSession.PlayerID != r.OwnerID {
 		return r.replyError(playerSession, envelope.RequestID, errs.CodeNotRoomOwner, errs.ErrNotRoomOwner.Error())
@@ -235,8 +241,18 @@ func (r *Room) handleStart(playerSession *session.Session, envelope protocol.Env
 			return r.replyError(playerSession, envelope.RequestID, errs.CodeRoomNotReady, errs.ErrRoomNotReady.Error())
 		}
 	}
+	playerIDs := make([]int64, 0, len(r.Members))
+	for _, member := range r.Members {
+		playerIDs = append(playerIDs, member.PlayerID)
+	}
+	engine, err := uno.New(playerIDs, uno.Config{})
+	if err != nil {
+		return r.replyError(playerSession, envelope.RequestID, errs.CodeInternal, "创建牌局失败")
+	}
+	r.engine = engine
 	r.Phase = PhasePlaying
 	r.broadcastState()
+	r.broadcastGameState()
 	return nil
 }
 
