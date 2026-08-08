@@ -28,6 +28,10 @@ type Config struct {
 	ManagedActionDelay time.Duration
 	// TimeoutStrikeLimit 为玩家连续超时多少次后进入托管。
 	TimeoutStrikeLimit int
+	// EmptyRoomTTL 是所有成员断线后保留房间以等待重连的最长时间。
+	EmptyRoomTTL time.Duration
+	// MetricsEnabled 控制是否注册 Prometheus 指标端点。
+	MetricsEnabled bool
 	// NodeID 是雪花 ID 中的节点编号，范围为 0–1023。
 	NodeID int64
 	// MySQLDSN 为空时关闭 MySQL 持久化，非空时在启动阶段建立连接。
@@ -83,6 +87,8 @@ func Load() Config {
 			200*time.Millisecond,
 		),
 		TimeoutStrikeLimit: envIntOrDefault("UNO_TIMEOUT_STRIKE_LIMIT", 2),
+		EmptyRoomTTL:       envDurationOrDefault("UNO_EMPTY_ROOM_TTL", 15*time.Minute),
+		MetricsEnabled:     envBoolOrDefault("UNO_METRICS_ENABLED", true),
 		NodeID:             int64(envIntOrDefault("UNO_NODE_ID", 1)),
 		MySQLDSN:           envOrDefault("UNO_MYSQL_DSN", ""),
 		MySQLMaxOpenConns:  envIntOrDefault("UNO_MYSQL_MAX_OPEN_CONNS", 10),
@@ -136,6 +142,9 @@ func (c Config) Validate() error {
 	}
 	if c.TimeoutStrikeLimit <= 0 {
 		return fmt.Errorf("TimeoutStrikeLimit 必须大于 0")
+	}
+	if c.EmptyRoomTTL <= 0 {
+		return fmt.Errorf("EmptyRoomTTL 必须大于 0")
 	}
 	if c.NodeID < 0 || c.NodeID > 1023 {
 		return fmt.Errorf("NodeID 必须在 0–1023 范围内")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
@@ -68,13 +69,19 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 		}
 
 		duration := time.Since(startedAt)
+		route := metricRoute(request.Pattern)
+		if s.metrics != nil {
+			s.metrics.ObserveHTTPRequest(request.Method, route, recorder.statusCode, duration)
+		}
 		fields := []any{
+			"event", "http_request",
 			"method", request.Method,
+			"route", route,
 			"path", request.URL.Path,
-			"status", recorder.statusCode,
+			"status_code", recorder.statusCode,
 			"duration_ms", duration.Milliseconds(),
-			"bytes", recorder.bytesWritten,
-			"remote", request.RemoteAddr,
+			"response_bytes", recorder.bytesWritten,
+			"remote_addr", request.RemoteAddr,
 		}
 		if recorder.hijacked {
 			fields = append(fields, "hijacked", true)
@@ -90,4 +97,15 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 			contextLogger.Info("http request", fields...)
 		}
 	})
+}
+
+// metricRoute 从 ServeMux 的固定模式中移除方法前缀，并折叠未匹配路径。
+func metricRoute(pattern string) string {
+	if separator := strings.IndexByte(pattern, ' '); separator >= 0 {
+		pattern = pattern[separator+1:]
+	}
+	if pattern == "" {
+		return "unmatched"
+	}
+	return pattern
 }

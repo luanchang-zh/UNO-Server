@@ -35,6 +35,12 @@ type CloseHook interface {
 	OnSessionClose(playerSession *Session)
 }
 
+// MessageObserver 接收固定结果分类的 WebSocket 入站消息指标。
+type MessageObserver interface {
+	// ObserveWebSocketMessage 记录一条入站消息的固定处理结果。
+	ObserveWebSocketMessage(result string)
+}
+
 // Session 表示一条已鉴权的 WebSocket 连接。
 type Session struct {
 	// ID 连接级唯一标识。
@@ -50,6 +56,7 @@ type Session struct {
 	manager     *Manager
 	router      InboundRouter
 	closeHook   CloseHook
+	observer    MessageObserver
 	remoteAddr  string
 	connectedAt time.Time
 
@@ -75,6 +82,8 @@ type Options struct {
 	Router InboundRouter
 	// CloseHook 可选，断线时通知业务层。
 	CloseHook CloseHook
+	// Observer 可选，记录低基数 WebSocket 消息结果指标。
+	Observer MessageObserver
 }
 
 // New 创建会话、登记 Manager（若有）并启动读写泵。
@@ -105,6 +114,7 @@ func New(options Options) (*Session, error) {
 		manager:     options.Manager,
 		router:      options.Router,
 		closeHook:   options.CloseHook,
+		observer:    options.Observer,
 		remoteAddr:  remoteAddr,
 		connectedAt: time.Now(),
 		closed:      make(chan struct{}),
@@ -165,10 +175,12 @@ func (s *Session) Close() {
 
 		// 断线日志：覆盖整段在线时长（与握手访问日志成对）。
 		ctx := logx.IntoContext(context.Background(), s.logger, logx.NewTraceID())
-		s.logger.WithContext(ctx).Info("ws connection closed",
-			"conn_id", s.ID,
+		s.logger.WithContext(ctx).Info("WebSocket 连接关闭",
+			"event", "websocket_connection_closed",
+			"result", "closed",
+			"connection_id", s.ID,
 			"player_id", s.PlayerID,
-			"remote", s.remoteAddr,
+			"remote_addr", s.remoteAddr,
 			"duration_ms", time.Since(s.connectedAt).Milliseconds(),
 		)
 	})
@@ -219,20 +231,24 @@ func (s *Session) handleInbound(ctx context.Context, payload []byte) {
 	var handleErr error
 
 	defer func() {
+		if s.observer != nil {
+			s.observer.ObserveWebSocketMessage(result)
+		}
 		fields := []any{
-			"conn_id", s.ID,
+			"event", "websocket_message",
+			"connection_id", s.ID,
 			"player_id", s.PlayerID,
-			"type", messageType,
+			"message_type", messageType,
 			"result", result,
 			"duration_ms", time.Since(startedAt).Milliseconds(),
 		}
 		contextLogger := s.logger.WithContext(ctx)
 		if handleErr != nil {
 			fields = append(fields, "error", handleErr.Error())
-			contextLogger.Warn("ws message", fields...)
+			contextLogger.Warn("WebSocket 消息", fields...)
 			return
 		}
-		contextLogger.Info("ws message", fields...)
+		contextLogger.Info("WebSocket 消息", fields...)
 	}()
 
 	envelope, err := protocol.Decode(payload)

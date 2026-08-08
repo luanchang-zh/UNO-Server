@@ -38,10 +38,19 @@ func (s *Server) handleWebSocket(writer http.ResponseWriter, request *http.Reque
 	conn, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
 		// Upgrade 内部可能已写响应；此处仅补日志。
-		s.logger.WithContext(request.Context()).Warn("websocket upgrade failed", "error", err)
+		s.logger.WithContext(request.Context()).Warn(
+			"WebSocket 升级失败",
+			"event", "websocket_upgrade",
+			"result", "error",
+			"error", err,
+		)
 		return
 	}
 
+	var messageObserver session.MessageObserver
+	if s.metrics != nil {
+		messageObserver = s.metrics
+	}
 	playerSession, err := session.New(session.Options{
 		ID:        logx.NewTraceID(),
 		PlayerID:  authSession.PlayerID,
@@ -51,6 +60,7 @@ func (s *Server) handleWebSocket(writer http.ResponseWriter, request *http.Reque
 		Manager:   s.sessions,
 		Router:    s.rooms,
 		CloseHook: s.rooms,
+		Observer:  messageObserver,
 	})
 	if err != nil {
 		_ = conn.Close()
@@ -65,7 +75,9 @@ func (s *Server) handleWebSocket(writer http.ResponseWriter, request *http.Reque
 	if err := s.rooms.OnSessionOpen(playerSession); err != nil {
 		// 重连换绑失败不关闭基础连接，玩家仍可收到明确错误后重新选择操作。
 		s.logger.WithContext(request.Context()).Warn(
-			"websocket room rebind failed",
+			"WebSocket 房间换绑失败",
+			"event", "websocket_room_rebind",
+			"result", "error",
 			"player_id", playerSession.PlayerID,
 			"error", err,
 		)

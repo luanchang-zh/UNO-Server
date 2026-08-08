@@ -15,6 +15,7 @@ import (
 	"github.com/luanchang-zh/UNO-Server/internal/idgen"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
+	"github.com/luanchang-zh/UNO-Server/internal/observability"
 	"github.com/luanchang-zh/UNO-Server/internal/room"
 	"github.com/luanchang-zh/UNO-Server/internal/session"
 	"github.com/luanchang-zh/UNO-Server/internal/store"
@@ -38,6 +39,7 @@ type Server struct {
 	rooms      *room.Manager
 	httpServer *http.Server
 	logger     *logx.Logger
+	metrics    *observability.Metrics
 }
 
 // New 根据配置和进程依赖创建 HTTP Server 并注册路由。
@@ -47,6 +49,14 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger, depe
 	}
 
 	mux := http.NewServeMux()
+	var metrics *observability.Metrics
+	if cfg.MetricsEnabled {
+		metrics = observability.New()
+	}
+	var roomObserver room.Observer
+	if metrics != nil {
+		roomObserver = metrics
+	}
 	srv := &Server{
 		cfg:      cfg,
 		auth:     authService,
@@ -61,13 +71,20 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger, depe
 			SnapshotRepository: dependencies.RoomSnapshotRepository,
 			SnapshotTimeout:    cfg.RedisOperationTimeout,
 			SnapshotTTL:        cfg.RedisRoomSnapshotTTL,
+			EmptyRoomTTL:       cfg.EmptyRoomTTL,
+			Observer:           roomObserver,
 		}),
-		logger: logger,
+		logger:  logger,
+		metrics: metrics,
 	}
 
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("POST /api/v1/auth/guest", srv.handleGuestLogin)
 	mux.HandleFunc("GET /ws", srv.handleWebSocket)
+	if metrics != nil {
+		metrics.RegisterRuntimeGauges(srv.rooms.Count, srv.sessions.Count)
+		mux.Handle("GET /metrics", metrics.Handler())
+	}
 
 	// 访问日志中间件包在最外层：每个 HTTP 请求结束只打一条日志（WS 握手返回即记一条）。
 	// WebSocket 为长连接：不设 WriteTimeout/ReadTimeout，仅限制读 header。
@@ -90,7 +107,12 @@ func (s *Server) RestoreRooms(ctx context.Context) error {
 
 // Start 开始监听；阻塞直到服务关闭或发生不可恢复错误。
 func (s *Server) Start() error {
-	s.logger.WithContext(context.Background()).Info("HTTP 服务启动", "addr", s.cfg.HTTPAddr)
+	s.logger.WithContext(context.Background()).Info(
+		"HTTP 服务启动",
+		"event", "server_start",
+		"addr", s.cfg.HTTPAddr,
+		"metrics_enabled", s.cfg.MetricsEnabled,
+	)
 	err := s.httpServer.ListenAndServe()
 	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		return nil
@@ -100,7 +122,12 @@ func (s *Server) Start() error {
 
 // Shutdown 停止 HTTP 接入、断开 WebSocket，并要求每间房在 mailbox 内刷最终快照。
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.logger.WithContext(ctx).Info("HTTP 服务关闭中", "ws_connections", s.sessions.Count())
+	s.logger.WithContext(ctx).Info(
+		"HTTP 服务关闭中",
+		"event", "server_shutdown",
+		"room_count", s.rooms.Count(),
+		"websocket_connections", s.sessions.Count(),
+	)
 	var shutdownErr error
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("shutdown http server: %w", err))

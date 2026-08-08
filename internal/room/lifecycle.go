@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 	"github.com/luanchang-zh/UNO-Server/internal/protocol"
 	"github.com/luanchang-zh/UNO-Server/internal/store"
 )
@@ -23,6 +24,7 @@ func (m *Manager) Restore(ctx context.Context) error {
 	}
 	records, err := m.options.SnapshotRepository.LoadRoomSnapshots(ctx)
 	if err != nil {
+		m.observeRoomRestore("load_error")
 		return fmt.Errorf("load room snapshots: %w", err)
 	}
 	for _, record := range records {
@@ -33,14 +35,21 @@ func (m *Manager) Restore(ctx context.Context) error {
 
 // restoreRecord 恢复单个快照；损坏、终局或身份冲突记录会被隔离并从 Redis 清理。
 func (m *Manager) restoreRecord(ctx context.Context, record store.RoomSnapshotRecord) {
-	hooks := roomHooks{onEmpty: m.removeRoom, onMemberRemoved: m.clearPlayerRoom}
+	hooks := roomHooks{onDestroy: m.removeRoom, onMemberRemoved: m.clearPlayerRoom}
 	restored, err := restoreRoom(record, m.logger, m.options, hooks)
 	if err != nil {
 		levelMessage := "Redis 房间快照无效，已跳过恢复"
 		if errors.Is(err, errSettledSnapshot) {
 			levelMessage = "Redis 终局房间快照已清理"
 		}
-		m.logger.WithContext(ctx).Warn(levelMessage, "room_id", record.RoomID, "error", err)
+		m.observeRoomRestore("discarded")
+		m.logger.WithContext(ctx).Warn(
+			levelMessage,
+			"event", "room_restore",
+			"result", "discarded",
+			"room_id", record.RoomID,
+			"error", err,
+		)
 		m.cleanupSnapshotRecord(ctx, record)
 		return
 	}
@@ -70,13 +79,43 @@ func (m *Manager) restoreRecord(ctx context.Context, record store.RoomSnapshotRe
 	if conflict {
 		// 尚未发布的恢复房间先停止 mailbox，再清理由该停止动作最后写入的快照。
 		_ = restored.submitSync(ctx, commandStop, nil, protocol.Envelope{})
-		m.logger.WithContext(ctx).Warn("Redis 房间快照身份冲突，已跳过恢复", "room_id", record.RoomID)
+		m.observeRoomRestore("conflict")
+		m.logger.WithContext(ctx).Warn(
+			"Redis 房间快照身份冲突，已跳过恢复",
+			"event", "room_restore",
+			"result", "conflict",
+			"room_id", record.RoomID,
+		)
 		m.cleanupSnapshotRecord(ctx, record)
 		return
 	}
 
 	// 恢复后立即覆盖 connected/auto_play 与新截止时间，kill -9 再次发生时仍可正确接续。
-	_ = restored.submitSync(ctx, commandSnapshot, nil, protocol.Envelope{})
+	if err := restored.submitSync(ctx, commandSnapshot, nil, protocol.Envelope{}); err != nil {
+		m.logger.WithContext(ctx).Error(
+			"恢复后的房间快照刷新失败",
+			"event", "room_snapshot_sync",
+			"result", "error",
+			"room_id", record.RoomID,
+			"error", err,
+		)
+	}
+	m.observeRoomRestore("restored")
+	m.logger.WithContext(ctx).Info(
+		"Redis 房间快照恢复完成",
+		"event", "room_restore",
+		"result", "restored",
+		"room_id", record.RoomID,
+		"phase", restored.Phase,
+		"member_count", len(restored.Members),
+	)
+}
+
+// observeRoomRestore 将固定恢复结果交给可选观测组件。
+func (m *Manager) observeRoomRestore(result string) {
+	if m.options.Observer != nil {
+		m.options.Observer.ObserveRoomRestore(result)
+	}
 }
 
 // cleanupSnapshotRecord 尽可能提取成员 ID，并条件清理房间及玩家 Redis 索引。
@@ -87,6 +126,8 @@ func (m *Manager) cleanupSnapshotRecord(ctx context.Context, record store.RoomSn
 	if err := m.options.SnapshotRepository.DeleteRoomSnapshot(cleanupCtx, record.RoomID, playerIDs); err != nil {
 		m.logger.WithContext(cleanupCtx).Error(
 			"Redis 无效房间快照清理失败",
+			"event", "room_snapshot_cleanup",
+			"result", "error",
 			"room_id", record.RoomID,
 			"error", err,
 		)
@@ -133,6 +174,10 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	var joined error
 	for _, target := range rooms {
 		if err := target.submitSync(ctx, commandStop, nil, protocol.Envelope{}); err != nil {
+			// 房间恰好被空房计时器回收时已经完成清理，无需把竞态视为停机失败。
+			if errors.Is(err, errs.ErrRoomNotFound) {
+				continue
+			}
 			joined = errors.Join(joined, fmt.Errorf("stop room %s: %w", target.ID, err))
 		}
 	}

@@ -19,6 +19,9 @@ func (r *Room) handleDisconnect(playerSession *session.Session) {
 		member.Session = nil
 		member.Connected = false
 		member.AutoPlay = true
+		if !r.hasConnectedMember() {
+			r.scheduleEmptyRoomTimer()
+		}
 		currentActor := r.isCurrentGamePlayer(member.PlayerID)
 		if currentActor {
 			r.scheduleTurnTimer()
@@ -48,6 +51,7 @@ func (r *Room) tryReconnect(playerSession *session.Session) error {
 	member.Connected = true
 	member.AutoPlay = false
 	member.TimeoutStrikes = 0
+	r.cancelEmptyRoomTimer()
 	currentActor := r.Phase == PhasePlaying && r.isCurrentGamePlayer(member.PlayerID)
 	if currentActor {
 		r.scheduleTurnTimer()
@@ -83,6 +87,9 @@ func (r *Room) abandonMember(playerID int64) {
 	currentActor := r.isCurrentGamePlayer(playerID)
 	if currentActor {
 		r.scheduleTurnTimer()
+	}
+	if !r.hasConnectedMember() {
+		r.scheduleEmptyRoomTimer()
 	}
 	r.broadcastState()
 	if currentActor {

@@ -93,6 +93,11 @@ type Room struct {
 	snapshotTTL      time.Duration
 	snapshotRevision uint64
 	destroyed        bool
+	// 空房回收计时器只投递带版本号的 mailbox 事件，重连会使旧事件失效。
+	emptyRoomTTL time.Duration
+	emptyTimer   *time.Timer
+	emptyToken   uint64
+	observer     Observer
 
 	mailbox chan roomCommand
 	closed  chan struct{}
@@ -101,12 +106,10 @@ type Room struct {
 	submitMu sync.Mutex
 	closing  bool
 
-	// onEmpty 房间空员时回调 Manager 销毁。
-	onEmpty func(roomID string)
+	// onDestroy 在成员清空或空连接超时后回调 Manager 移除房间。
+	onDestroy func(roomID string)
 	// onMemberRemoved 任意成员离开时回调，用于清理 player→room 索引。
 	onMemberRemoved func(roomID string, playerID int64)
-	// once 保证 loop 只退出一次相关清理。
-	stopOnce sync.Once
 }
 
 // roomCommand 进入 mailbox 的串行命令。
@@ -116,6 +119,7 @@ type roomCommand struct {
 	envelope   protocol.Envelope
 	kind       commandKind
 	timerToken uint64
+	emptyToken uint64
 	done       chan error // 可选，同步等待结果（测试用）
 }
 
@@ -129,13 +133,14 @@ const (
 	commandReconnect
 	commandTurnTimeout
 	commandAutoPlay
+	commandEmptyRoomTimeout
 	commandSnapshot
 	commandStop
 )
 
 // roomHooks Manager 注入的生命周期回调。
 type roomHooks struct {
-	onEmpty         func(roomID string)
+	onDestroy       func(roomID string)
 	onMemberRemoved func(roomID string, playerID int64)
 }
 
@@ -179,7 +184,9 @@ func newRoom(
 		snapshotsStore:     options.SnapshotRepository,
 		snapshotTimeout:    options.SnapshotTimeout,
 		snapshotTTL:        options.SnapshotTTL,
-		onEmpty:            hooks.onEmpty,
+		emptyRoomTTL:       options.EmptyRoomTTL,
+		observer:           options.Observer,
+		onDestroy:          hooks.onDestroy,
 		onMemberRemoved:    hooks.onMemberRemoved,
 	}
 	go room.loop()
@@ -191,10 +198,12 @@ func (r *Room) loop() {
 	defer close(r.closed)
 	for cmd := range r.mailbox {
 		var err error
+		stopAfterCommand := false
 		switch cmd.kind {
 		case commandStop:
 			err = r.syncSnapshot(cmd.ctx)
 			r.cancelTurnTimer()
+			r.cancelEmptyRoomTimer()
 			if cmd.done != nil {
 				cmd.done <- err
 			}
@@ -205,13 +214,17 @@ func (r *Room) loop() {
 			err = r.tryReconnect(cmd.session)
 		case commandTurnTimeout, commandAutoPlay:
 			r.handleAutomatedTurn(cmd.kind, cmd.timerToken)
+		case commandEmptyRoomTimeout:
+			stopAfterCommand = r.handleEmptyRoomTimeout(cmd.emptyToken)
 		case commandJoin:
 			err = r.tryJoin(cmd.session)
 		case commandSnapshot:
-			// 空命令只用于要求 mailbox 立即把当前权威状态写入 Redis。
+			// 恢复后的首次快照同时在 mailbox 内启动空房保留计时。
+			r.scheduleEmptyRoomTimer()
 		case commandMessage:
 			err = r.handleMessage(cmd.ctx, cmd.session, cmd.envelope)
 		}
+		stopAfterCommand = stopAfterCommand || r.destroyed
 		if snapshotErr := r.syncSnapshot(cmd.ctx); snapshotErr != nil {
 			ctx := cmd.ctx
 			if ctx == nil {
@@ -219,12 +232,18 @@ func (r *Room) loop() {
 			}
 			r.logger.WithContext(ctx).Error(
 				"Redis 房间快照同步失败",
+				"event", "room_snapshot_sync",
+				"result", "error",
 				"room_id", r.ID,
 				"error", snapshotErr,
 			)
 		}
 		if cmd.done != nil {
 			cmd.done <- err
+		}
+		if stopAfterCommand {
+			r.rejectPendingCommands()
+			return
 		}
 	}
 }
@@ -415,6 +434,7 @@ func (r *Room) tryJoin(playerSession *session.Session) error {
 		Connected: true,
 		Session:   playerSession,
 	})
+	r.cancelEmptyRoomTimer()
 	r.broadcastState()
 	return nil
 }
@@ -437,17 +457,10 @@ func (r *Room) removeMember(playerID int64) {
 	}
 
 	if len(r.Members) == 0 {
-		r.destroyed = true
-		if r.onEmpty != nil {
-			r.onEmpty(r.ID)
+		r.beginDestroy()
+		if r.onDestroy != nil {
+			r.onDestroy(r.ID)
 		}
-		// 异步停止 loop，避免在 loop 内同步投递死锁。
-		r.stopOnce.Do(func() {
-			go func() {
-				done := make(chan error, 1)
-				_ = r.submit(roomCommand{kind: commandStop, done: done})
-			}()
-		})
 		return
 	}
 
@@ -455,6 +468,9 @@ func (r *Room) removeMember(playerID int64) {
 	if playerID == r.OwnerID {
 		r.OwnerID = r.Members[0].PlayerID
 		r.Members[0].Ready = true
+	}
+	if !r.hasConnectedMember() {
+		r.scheduleEmptyRoomTimer()
 	}
 	r.broadcastState()
 }

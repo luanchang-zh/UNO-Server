@@ -119,8 +119,47 @@ func TestAccessLog_OneLineWithTraceID(t *testing.T) {
 	if !strings.Contains(lines[0], `"msg":"http request"`) {
 		t.Fatalf("日志应为 http request，实际: %s", lines[0])
 	}
-	if !strings.Contains(lines[0], `"status":200`) {
-		t.Fatalf("日志应含 status=200，实际: %s", lines[0])
+	if !strings.Contains(lines[0], `"status_code":200`) {
+		t.Fatalf("日志应含 status_code=200，实际: %s", lines[0])
+	}
+	if !strings.Contains(lines[0], `"event":"http_request"`) ||
+		!strings.Contains(lines[0], `"route":"/healthz"`) {
+		t.Fatalf("日志应含统一事件与路由字段，实际: %s", lines[0])
+	}
+}
+
+// TestMetricsEndpointIsOptional 验证指标路由可关闭，启用后会暴露业务和运行时指标。
+func TestMetricsEndpointIsOptional(t *testing.T) {
+	disabled := newTestServer(io.Discard)
+	disabledRecorder := httptest.NewRecorder()
+	disabled.httpServer.Handler.ServeHTTP(
+		disabledRecorder,
+		httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody),
+	)
+	if disabledRecorder.Code != http.StatusNotFound {
+		t.Fatalf("关闭指标时状态码=%d", disabledRecorder.Code)
+	}
+
+	enabled := newTestServerWithMetrics(io.Discard, true)
+	enabled.httpServer.Handler.ServeHTTP(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody),
+	)
+	metricsRecorder := httptest.NewRecorder()
+	enabled.httpServer.Handler.ServeHTTP(
+		metricsRecorder,
+		httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody),
+	)
+	if metricsRecorder.Code != http.StatusOK {
+		t.Fatalf("启用指标时状态码=%d", metricsRecorder.Code)
+	}
+	body := metricsRecorder.Body.String()
+	if !strings.Contains(body, `uno_server_http_requests_total{method="GET",route="/healthz",status_class="2xx"} 1`) {
+		t.Fatalf("指标输出缺少健康检查请求：%s", body)
+	}
+	if !strings.Contains(body, "uno_server_room_active 0") ||
+		!strings.Contains(body, "uno_server_websocket_connections 0") {
+		t.Fatal("指标输出缺少房间或连接仪表盘")
 	}
 }
 
@@ -152,6 +191,11 @@ func TestAccessLog_WarnOn4xx(t *testing.T) {
 
 // newTestServer 构造带可捕获日志输出的测试 Server。
 func newTestServer(logOutput io.Writer) *Server {
+	return newTestServerWithMetrics(logOutput, false)
+}
+
+// newTestServerWithMetrics 构造可显式切换指标端点的测试 Server。
+func newTestServerWithMetrics(logOutput io.Writer, metricsEnabled bool) *Server {
 	cfg := config.Config{
 		HTTPAddr:        ":0",
 		ReadTimeout:     2 * time.Second,
@@ -159,6 +203,7 @@ func newTestServer(logOutput io.Writer) *Server {
 		ShutdownTimeout: 2 * time.Second,
 		TokenTTL:        time.Hour,
 		MaxNicknameLen:  32,
+		MetricsEnabled:  metricsEnabled,
 	}
 	authService := auth.NewService(auth.Options{
 		TokenTTL:       cfg.TokenTTL,

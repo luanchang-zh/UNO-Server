@@ -210,11 +210,13 @@ func restoreRoom(
 		snapshotsStore:     options.SnapshotRepository,
 		snapshotTimeout:    options.SnapshotTimeout,
 		snapshotTTL:        options.SnapshotTTL,
+		emptyRoomTTL:       options.EmptyRoomTTL,
+		observer:           options.Observer,
 		snapshotRevision:   snapshot.Revision,
 		mailbox:            make(chan roomCommand, mailboxSize),
 		closed:             make(chan struct{}),
 		logger:             logger,
-		onEmpty:            hooks.onEmpty,
+		onDestroy:          hooks.onDestroy,
 		onMemberRemoved:    hooks.onMemberRemoved,
 	}
 	if snapshot.MatchStartedAt != nil {

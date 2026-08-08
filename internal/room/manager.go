@@ -27,9 +27,18 @@ const (
 	defaultPersistenceTimeout = 3 * time.Second
 	defaultSnapshotTimeout    = 2 * time.Second
 	defaultSnapshotTTL        = rediskey.DefaultRoomSnapshotTTL
+	defaultEmptyRoomTTL       = 15 * time.Minute
 )
 
-// Options 控制房间回合计时、自动托管和持久化边界行为。
+// Observer 接收固定分类的房间恢复与回收事件，用于实现低基数运行指标。
+type Observer interface {
+	// ObserveRoomGarbageCollection 记录指定阶段的一次空房回收。
+	ObserveRoomGarbageCollection(phase string)
+	// ObserveRoomRestore 记录一条快照的固定恢复结果。
+	ObserveRoomRestore(result string)
+}
+
+// Options 控制房间回合计时、自动托管、回收和持久化边界行为。
 type Options struct {
 	// TurnTimeout 是连接中玩家一次手动行动的等待上限。
 	TurnTimeout time.Duration
@@ -49,6 +58,10 @@ type Options struct {
 	SnapshotTimeout time.Duration
 	// SnapshotTTL 是活跃房间快照与玩家房间索引的兜底有效期。
 	SnapshotTTL time.Duration
+	// EmptyRoomTTL 是全部成员断线后保留房间等待重连的最长时间。
+	EmptyRoomTTL time.Duration
+	// Observer 非空时接收房间恢复与空房回收指标事件。
+	Observer Observer
 }
 
 // Manager 管理全部房间，并作为 Session 的入站路由实现。
@@ -96,6 +109,9 @@ func normalizeOptions(options Options) Options {
 	}
 	if options.SnapshotTTL <= 0 {
 		options.SnapshotTTL = defaultSnapshotTTL
+	}
+	if options.EmptyRoomTTL <= 0 {
+		options.EmptyRoomTTL = defaultEmptyRoomTTL
 	}
 	return options
 }
@@ -192,7 +208,7 @@ func (m *Manager) handleCreateRoom(ctx context.Context, playerSession *session.S
 	}
 
 	created := newRoom(roomID, maxPlayers, playerSession, m.logger, m.options, roomHooks{
-		onEmpty:         m.removeRoom,
+		onDestroy:       m.removeRoom,
 		onMemberRemoved: m.clearPlayerRoom,
 	})
 	m.mu.Lock()
@@ -290,7 +306,7 @@ func (m *Manager) forwardToPlayerRoom(ctx context.Context, playerSession *sessio
 	return nil
 }
 
-// removeRoom 空房回调：从索引移除并清理成员映射。
+// removeRoom 销毁回调：从房间索引移除并清理全部成员映射。
 func (m *Manager) removeRoom(roomID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -322,6 +338,8 @@ func (m *Manager) deletePlayerRoomSnapshot(roomID string, playerID int64) {
 	if err := m.options.SnapshotRepository.DeletePlayerRoom(ctx, roomID, playerID); err != nil {
 		m.logger.WithContext(ctx).Error(
 			"Redis 玩家房间索引清理失败",
+			"event", "player_room_index_cleanup",
+			"result", "error",
 			"room_id", roomID,
 			"player_id", playerID,
 			"error", err,

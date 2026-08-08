@@ -1,0 +1,62 @@
+name: uno-server
+
+services:
+  app:
+    build:
+      context: .
+    environment:
+      UNO_HTTP_ADDR: ":8080"
+      UNO_NODE_ID: "${UNO_NODE_ID:-1}"
+      UNO_MYSQL_DSN: "uno:${UNO_MYSQL_PASSWORD:-uno_dev_password}@tcp(mysql:3306)/uno?parseTime=true&loc=UTC&charset=utf8mb4"
+      UNO_REDIS_ADDR: "redis:6379"
+      UNO_METRICS_ENABLED: "true"
+      UNO_EMPTY_ROOM_TTL: "${UNO_EMPTY_ROOM_TTL:-15m}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: uno
+      MYSQL_USER: uno
+      MYSQL_PASSWORD: "${UNO_MYSQL_PASSWORD:-uno_dev_password}"
+      MYSQL_ROOT_PASSWORD: "${UNO_MYSQL_ROOT_PASSWORD:-uno_root_password}"
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  redis-data:

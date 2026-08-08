@@ -157,6 +157,8 @@ func (r *Room) finishAutomatedAction(memberStateChanged bool) {
 		if err := r.persistSettlement(view.Result); err != nil {
 			r.logger.WithContext(context.Background()).Error(
 				"自动牌局结算持久化失败",
+				"event", "match_settlement",
+				"result", "error",
 				"room_id", r.ID,
 				"match_id", r.matchID,
 				"error", err,

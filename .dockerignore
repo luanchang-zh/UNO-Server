@@ -1,0 +1,10 @@
+.git
+.env
+.idea
+.vscode
+bin
+coverage.out
+coverage.html
+*.exe
+*.test
+*.log

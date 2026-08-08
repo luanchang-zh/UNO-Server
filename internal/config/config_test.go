@@ -5,11 +5,13 @@ import (
 	"time"
 )
 
-// TestLoadLifecycleConfig 验证 M4 回合计时与托管参数可以从环境变量加载。
+// TestLoadLifecycleConfig 验证回合计时、空房回收与指标参数可以从环境变量加载。
 func TestLoadLifecycleConfig(t *testing.T) {
 	t.Setenv("UNO_TURN_TIMEOUT", "17s")
 	t.Setenv("UNO_MANAGED_ACTION_DELAY", "350ms")
 	t.Setenv("UNO_TIMEOUT_STRIKE_LIMIT", "3")
+	t.Setenv("UNO_EMPTY_ROOM_TTL", "45s")
+	t.Setenv("UNO_METRICS_ENABLED", "false")
 
 	loaded := Load()
 	if loaded.TurnTimeout != 17*time.Second {
@@ -20,6 +22,9 @@ func TestLoadLifecycleConfig(t *testing.T) {
 	}
 	if loaded.TimeoutStrikeLimit != 3 {
 		t.Fatalf("TimeoutStrikeLimit=%d", loaded.TimeoutStrikeLimit)
+	}
+	if loaded.EmptyRoomTTL != 45*time.Second || loaded.MetricsEnabled {
+		t.Fatalf("空房时限或指标开关加载失败：ttl=%s metrics=%v", loaded.EmptyRoomTTL, loaded.MetricsEnabled)
 	}
 	if err := loaded.Validate(); err != nil {
 		t.Fatalf("合法配置校验失败：%v", err)
@@ -36,6 +41,7 @@ func TestValidateRejectsInvalidLifecycleConfig(t *testing.T) {
 		TurnTimeout:        20 * time.Second,
 		ManagedActionDelay: 200 * time.Millisecond,
 		TimeoutStrikeLimit: 2,
+		EmptyRoomTTL:       time.Minute,
 	}
 	tests := []struct {
 		name   string
@@ -44,6 +50,7 @@ func TestValidateRejectsInvalidLifecycleConfig(t *testing.T) {
 		{name: "回合超时", mutate: func(config *Config) { config.TurnTimeout = 0 }},
 		{name: "托管间隔", mutate: func(config *Config) { config.ManagedActionDelay = 0 }},
 		{name: "连续超时次数", mutate: func(config *Config) { config.TimeoutStrikeLimit = 0 }},
+		{name: "空房保留时限", mutate: func(config *Config) { config.EmptyRoomTTL = 0 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -103,6 +110,7 @@ func TestValidateRejectsInvalidMySQLConfig(t *testing.T) {
 		TurnTimeout:           20 * time.Second,
 		ManagedActionDelay:    200 * time.Millisecond,
 		TimeoutStrikeLimit:    2,
+		EmptyRoomTTL:          time.Minute,
 		NodeID:                1,
 		MySQLDSN:              "uno:secret@tcp(127.0.0.1:3306)/uno",
 		MySQLMaxOpenConns:     10,
@@ -178,6 +186,7 @@ func TestValidateRejectsInvalidRedisConfig(t *testing.T) {
 		TurnTimeout:           20 * time.Second,
 		ManagedActionDelay:    200 * time.Millisecond,
 		TimeoutStrikeLimit:    2,
+		EmptyRoomTTL:          time.Minute,
 		NodeID:                1,
 		RedisAddr:             "127.0.0.1:6379",
 		RedisPoolSize:         10,

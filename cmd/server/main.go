@@ -24,10 +24,10 @@ func main() {
 	logger := logx.New(slog.LevelInfo)
 	rootCtx := context.Background()
 	if err := run(rootCtx, logger); err != nil {
-		logger.WithContext(rootCtx).Error("服务退出", "error", err)
+		logger.WithContext(rootCtx).Error("服务退出", "event", "process_exit", "result", "error", "error", err)
 		os.Exit(1)
 	}
-	logger.WithContext(rootCtx).Info("服务已退出")
+	logger.WithContext(rootCtx).Info("服务已退出", "event", "process_exit", "result", "ok")
 }
 
 // run 加载配置，装配 MySQL、Redis 与业务服务，并在退出前释放全部进程资源。
@@ -88,7 +88,7 @@ func run(rootCtx context.Context, logger *logx.Logger) error {
 			return fmt.Errorf("serve http: %w", err)
 		}
 	case sig := <-signalCh:
-		logger.WithContext(rootCtx).Info("收到退出信号", "signal", sig.String())
+		logger.WithContext(rootCtx).Info("收到退出信号", "event", "shutdown_signal", "signal", sig.String())
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.ShutdownTimeout)
 		defer cancel()
 		if err := httpServer.Shutdown(ctx); err != nil {
@@ -109,7 +109,7 @@ func openMySQLRepositories(
 	logger *logx.Logger,
 ) (store.PlayerRepository, store.MatchRepository, func(), error) {
 	if cfg.MySQLDSN == "" {
-		logger.WithContext(rootCtx).Warn("MySQL 持久化未启用")
+		logger.WithContext(rootCtx).Warn("MySQL 持久化未启用", "event", "mysql_setup", "result", "disabled")
 		return nil, nil, func() {}, nil
 	}
 	openCtx, cancelOpen := context.WithTimeout(rootCtx, cfg.MySQLOperationTimeout)
@@ -133,7 +133,7 @@ func openMySQLRepositories(
 			return nil, nil, func() {}, fmt.Errorf("migrate mysql: %w", err)
 		}
 	}
-	logger.WithContext(rootCtx).Info("MySQL 持久化已启用")
+	logger.WithContext(rootCtx).Info("MySQL 持久化已启用", "event", "mysql_setup", "result", "enabled")
 	return repository, repository, func() { _ = repository.Close() }, nil
 }
 
@@ -144,7 +144,7 @@ func openRedisRepositories(
 	logger *logx.Logger,
 ) (store.SessionRepository, store.RoomSnapshotRepository, func(), error) {
 	if cfg.RedisAddr == "" {
-		logger.WithContext(rootCtx).Warn("Redis 持久化未启用")
+		logger.WithContext(rootCtx).Warn("Redis 持久化未启用", "event", "redis_setup", "result", "disabled")
 		return nil, nil, func() {}, nil
 	}
 	openCtx, cancel := context.WithTimeout(rootCtx, cfg.RedisOperationTimeout)
@@ -163,6 +163,10 @@ func openRedisRepositories(
 	if err != nil {
 		return nil, nil, func() {}, fmt.Errorf("open redis repository: %w", err)
 	}
-	logger.WithContext(rootCtx).Info("Redis token 与房间快照持久化已启用")
+	logger.WithContext(rootCtx).Info(
+		"Redis token 与房间快照持久化已启用",
+		"event", "redis_setup",
+		"result", "enabled",
+	)
 	return repository, repository, func() { _ = repository.Close() }, nil
 }
