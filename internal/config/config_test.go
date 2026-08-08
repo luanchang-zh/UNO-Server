@@ -133,3 +133,81 @@ func TestValidateRejectsInvalidMySQLConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadRedisConfig 验证 M6 Redis 连接池、超时与快照 TTL 可以从环境变量加载。
+func TestLoadRedisConfig(t *testing.T) {
+	t.Setenv("UNO_REDIS_ADDR", "127.0.0.1:6380")
+	t.Setenv("UNO_REDIS_USERNAME", "uno")
+	t.Setenv("UNO_REDIS_PASSWORD", "secret")
+	t.Setenv("UNO_REDIS_DB", "3")
+	t.Setenv("UNO_REDIS_POOL_SIZE", "18")
+	t.Setenv("UNO_REDIS_MIN_IDLE_CONNS", "4")
+	t.Setenv("UNO_REDIS_DIAL_TIMEOUT", "1800ms")
+	t.Setenv("UNO_REDIS_READ_TIMEOUT", "900ms")
+	t.Setenv("UNO_REDIS_WRITE_TIMEOUT", "1100ms")
+	t.Setenv("UNO_REDIS_OPERATION_TIMEOUT", "1500ms")
+	t.Setenv("UNO_REDIS_ROOM_SNAPSHOT_TTL", "90m")
+
+	loaded := Load()
+	if loaded.RedisAddr != "127.0.0.1:6380" || loaded.RedisUsername != "uno" ||
+		loaded.RedisPassword != "secret" || loaded.RedisDB != 3 {
+		t.Fatalf("Redis 连接参数加载失败：%+v", loaded)
+	}
+	if loaded.RedisPoolSize != 18 || loaded.RedisMinIdleConns != 4 {
+		t.Fatalf("Redis 连接池参数错误：pool=%d idle=%d", loaded.RedisPoolSize, loaded.RedisMinIdleConns)
+	}
+	if loaded.RedisDialTimeout != 1800*time.Millisecond ||
+		loaded.RedisReadTimeout != 900*time.Millisecond ||
+		loaded.RedisWriteTimeout != 1100*time.Millisecond ||
+		loaded.RedisOperationTimeout != 1500*time.Millisecond ||
+		loaded.RedisRoomSnapshotTTL != 90*time.Minute {
+		t.Fatalf("Redis 时限参数错误：%+v", loaded)
+	}
+	if err := loaded.Validate(); err != nil {
+		t.Fatalf("合法 Redis 配置校验失败：%v", err)
+	}
+}
+
+// TestValidateRejectsInvalidRedisConfig 验证启用 Redis 后会严格校验连接池和时限参数。
+func TestValidateRejectsInvalidRedisConfig(t *testing.T) {
+	valid := Config{
+		HTTPAddr:              ":8080",
+		ShutdownTimeout:       time.Second,
+		TokenTTL:              time.Hour,
+		MaxNicknameLen:        32,
+		TurnTimeout:           20 * time.Second,
+		ManagedActionDelay:    200 * time.Millisecond,
+		TimeoutStrikeLimit:    2,
+		NodeID:                1,
+		RedisAddr:             "127.0.0.1:6379",
+		RedisPoolSize:         10,
+		RedisMinIdleConns:     1,
+		RedisDialTimeout:      3 * time.Second,
+		RedisReadTimeout:      2 * time.Second,
+		RedisWriteTimeout:     2 * time.Second,
+		RedisOperationTimeout: 2 * time.Second,
+		RedisRoomSnapshotTTL:  2 * time.Hour,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "数据库编号", mutate: func(config *Config) { config.RedisDB = -1 }},
+		{name: "连接池", mutate: func(config *Config) { config.RedisPoolSize = 0 }},
+		{name: "空闲连接", mutate: func(config *Config) { config.RedisMinIdleConns = 11 }},
+		{name: "拨号超时", mutate: func(config *Config) { config.RedisDialTimeout = 0 }},
+		{name: "读取超时", mutate: func(config *Config) { config.RedisReadTimeout = 0 }},
+		{name: "写入超时", mutate: func(config *Config) { config.RedisWriteTimeout = 0 }},
+		{name: "操作超时", mutate: func(config *Config) { config.RedisOperationTimeout = 0 }},
+		{name: "快照 TTL", mutate: func(config *Config) { config.RedisRoomSnapshotTTL = 0 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := valid
+			test.mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("非法 Redis 配置未被拒绝")
+			}
+		})
+	}
+}

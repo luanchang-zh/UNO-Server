@@ -26,6 +26,8 @@ type Dependencies struct {
 	IDGenerator idgen.Source
 	// MatchRepository 非空时记录开局和终局结算。
 	MatchRepository store.MatchRepository
+	// RoomSnapshotRepository 非空时保存并恢复 Redis 房间权威快照。
+	RoomSnapshotRepository store.RoomSnapshotRepository
 }
 
 // Server 封装标准库 HTTP 服务。
@@ -56,6 +58,9 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger, depe
 			IDGenerator:        dependencies.IDGenerator,
 			MatchRepository:    dependencies.MatchRepository,
 			PersistenceTimeout: cfg.MySQLOperationTimeout,
+			SnapshotRepository: dependencies.RoomSnapshotRepository,
+			SnapshotTimeout:    cfg.RedisOperationTimeout,
+			SnapshotTTL:        cfg.RedisRoomSnapshotTTL,
 		}),
 		logger: logger,
 	}
@@ -75,6 +80,14 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger, depe
 	return srv
 }
 
+// RestoreRooms 在开始监听前从 Redis 恢复房间；未启用 Redis 时为空操作。
+func (s *Server) RestoreRooms(ctx context.Context) error {
+	if err := s.rooms.Restore(ctx); err != nil {
+		return fmt.Errorf("restore rooms: %w", err)
+	}
+	return nil
+}
+
 // Start 开始监听；阻塞直到服务关闭或发生不可恢复错误。
 func (s *Server) Start() error {
 	s.logger.WithContext(context.Background()).Info("HTTP 服务启动", "addr", s.cfg.HTTPAddr)
@@ -85,15 +98,19 @@ func (s *Server) Start() error {
 	return fmt.Errorf("listen and serve: %w", err)
 }
 
-// Shutdown 先断开全部 WebSocket，再在超时时间内优雅关闭 HTTP。
+// Shutdown 停止 HTTP 接入、断开 WebSocket，并要求每间房在 mailbox 内刷最终快照。
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.WithContext(ctx).Info("HTTP 服务关闭中", "ws_connections", s.sessions.Count())
-	// 主动关闭在线连接，触发各自 Close → 断线日志 + Unregister。
-	s.sessions.CloseAll()
+	var shutdownErr error
 	if err := s.httpServer.Shutdown(ctx); err != nil {
-		return fmt.Errorf("shutdown http server: %w", err)
+		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("shutdown http server: %w", err))
 	}
-	return nil
+	// 主动关闭在线连接，先让房间处理完断线状态，再刷最终快照并停止 mailbox。
+	s.sessions.CloseAll()
+	if err := s.rooms.Shutdown(ctx); err != nil {
+		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("shutdown rooms: %w", err))
+	}
+	return shutdownErr
 }
 
 // handleHealthz 提供存活探针（不在 handler 内打访问日志，由中间件统一处理）。

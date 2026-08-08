@@ -44,6 +44,28 @@ type Config struct {
 	MySQLOperationTimeout time.Duration
 	// MySQLAutoMigrate 控制启动时是否幂等创建 M5 三张表。
 	MySQLAutoMigrate bool
+	// RedisAddr 为空时关闭 Redis，非空时启用 token 与房间快照持久化。
+	RedisAddr string
+	// RedisUsername 是 Redis ACL 用户名；未启用 ACL 时留空。
+	RedisUsername string
+	// RedisPassword 是 Redis ACL 或 requirepass 密码。
+	RedisPassword string
+	// RedisDB 是单节点 Redis 使用的逻辑数据库编号。
+	RedisDB int
+	// RedisPoolSize 是 Redis 连接池允许保留的最大连接数。
+	RedisPoolSize int
+	// RedisMinIdleConns 是 Redis 连接池预留的最小空闲连接数。
+	RedisMinIdleConns int
+	// RedisDialTimeout 是建立 Redis 连接的最长等待时间。
+	RedisDialTimeout time.Duration
+	// RedisReadTimeout 是读取 Redis 命令响应的最长等待时间。
+	RedisReadTimeout time.Duration
+	// RedisWriteTimeout 是写入 Redis 命令的最长等待时间。
+	RedisWriteTimeout time.Duration
+	// RedisOperationTimeout 是单次会话、快照或启动恢复操作的业务超时。
+	RedisOperationTimeout time.Duration
+	// RedisRoomSnapshotTTL 是活跃房间快照与玩家房间索引的兜底有效期。
+	RedisRoomSnapshotTTL time.Duration
 }
 
 // Load 从环境变量读取配置，未设置时使用本地开发默认值。
@@ -75,6 +97,20 @@ func Load() Config {
 			3*time.Second,
 		),
 		MySQLAutoMigrate: envBoolOrDefault("UNO_MYSQL_AUTO_MIGRATE", true),
+		RedisAddr:        envOrDefault("UNO_REDIS_ADDR", ""),
+		RedisUsername:    envOrDefault("UNO_REDIS_USERNAME", ""),
+		RedisPassword:    envOrDefault("UNO_REDIS_PASSWORD", ""),
+		RedisDB:          envIntOrDefault("UNO_REDIS_DB", 0),
+		RedisPoolSize:    envIntOrDefault("UNO_REDIS_POOL_SIZE", 10),
+		RedisMinIdleConns: envIntOrDefault(
+			"UNO_REDIS_MIN_IDLE_CONNS",
+			1,
+		),
+		RedisDialTimeout:      envDurationOrDefault("UNO_REDIS_DIAL_TIMEOUT", 3*time.Second),
+		RedisReadTimeout:      envDurationOrDefault("UNO_REDIS_READ_TIMEOUT", 2*time.Second),
+		RedisWriteTimeout:     envDurationOrDefault("UNO_REDIS_WRITE_TIMEOUT", 2*time.Second),
+		RedisOperationTimeout: envDurationOrDefault("UNO_REDIS_OPERATION_TIMEOUT", 2*time.Second),
+		RedisRoomSnapshotTTL:  envDurationOrDefault("UNO_REDIS_ROOM_SNAPSHOT_TTL", 2*time.Hour),
 	}
 }
 
@@ -104,23 +140,42 @@ func (c Config) Validate() error {
 	if c.NodeID < 0 || c.NodeID > 1023 {
 		return fmt.Errorf("NodeID 必须在 0–1023 范围内")
 	}
-	if c.MySQLDSN == "" {
-		return nil
+	if c.MySQLDSN != "" {
+		if c.MySQLMaxOpenConns <= 0 {
+			return fmt.Errorf("MySQLMaxOpenConns 必须大于 0")
+		}
+		if c.MySQLMaxIdleConns <= 0 || c.MySQLMaxIdleConns > c.MySQLMaxOpenConns {
+			return fmt.Errorf("MySQLMaxIdleConns 必须在 1–MySQLMaxOpenConns 范围内")
+		}
+		if c.MySQLConnMaxLifetime <= 0 {
+			return fmt.Errorf("MySQLConnMaxLifetime 必须大于 0")
+		}
+		if c.MySQLConnMaxIdleTime <= 0 {
+			return fmt.Errorf("MySQLConnMaxIdleTime 必须大于 0")
+		}
+		if c.MySQLOperationTimeout <= 0 {
+			return fmt.Errorf("MySQLOperationTimeout 必须大于 0")
+		}
 	}
-	if c.MySQLMaxOpenConns <= 0 {
-		return fmt.Errorf("MySQLMaxOpenConns 必须大于 0")
-	}
-	if c.MySQLMaxIdleConns <= 0 || c.MySQLMaxIdleConns > c.MySQLMaxOpenConns {
-		return fmt.Errorf("MySQLMaxIdleConns 必须在 1–MySQLMaxOpenConns 范围内")
-	}
-	if c.MySQLConnMaxLifetime <= 0 {
-		return fmt.Errorf("MySQLConnMaxLifetime 必须大于 0")
-	}
-	if c.MySQLConnMaxIdleTime <= 0 {
-		return fmt.Errorf("MySQLConnMaxIdleTime 必须大于 0")
-	}
-	if c.MySQLOperationTimeout <= 0 {
-		return fmt.Errorf("MySQLOperationTimeout 必须大于 0")
+	if c.RedisAddr != "" {
+		if c.RedisDB < 0 {
+			return fmt.Errorf("RedisDB 不能小于 0")
+		}
+		if c.RedisPoolSize <= 0 {
+			return fmt.Errorf("RedisPoolSize 必须大于 0")
+		}
+		if c.RedisMinIdleConns < 0 || c.RedisMinIdleConns > c.RedisPoolSize {
+			return fmt.Errorf("RedisMinIdleConns 必须在 0–RedisPoolSize 范围内")
+		}
+		if c.RedisDialTimeout <= 0 || c.RedisReadTimeout <= 0 || c.RedisWriteTimeout <= 0 {
+			return fmt.Errorf("Redis 连接与读写超时必须大于 0")
+		}
+		if c.RedisOperationTimeout <= 0 {
+			return fmt.Errorf("RedisOperationTimeout 必须大于 0")
+		}
+		if c.RedisRoomSnapshotTTL <= 0 {
+			return fmt.Errorf("RedisRoomSnapshotTTL 必须大于 0")
+		}
 	}
 	return nil
 }

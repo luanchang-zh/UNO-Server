@@ -14,6 +14,7 @@ import (
 	"github.com/luanchang-zh/UNO-Server/internal/idgen"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
+	"github.com/luanchang-zh/UNO-Server/internal/model/rediskey"
 	"github.com/luanchang-zh/UNO-Server/internal/protocol"
 	"github.com/luanchang-zh/UNO-Server/internal/session"
 	"github.com/luanchang-zh/UNO-Server/internal/store"
@@ -24,6 +25,8 @@ const (
 	defaultManagedActionDelay = 200 * time.Millisecond
 	defaultTimeoutStrikeLimit = 2
 	defaultPersistenceTimeout = 3 * time.Second
+	defaultSnapshotTimeout    = 2 * time.Second
+	defaultSnapshotTTL        = rediskey.DefaultRoomSnapshotTTL
 )
 
 // Options 控制房间回合计时、自动托管和持久化边界行为。
@@ -40,6 +43,12 @@ type Options struct {
 	MatchRepository store.MatchRepository
 	// PersistenceTimeout 限制单次开局或结算写入的最长时间。
 	PersistenceTimeout time.Duration
+	// SnapshotRepository 非空时同步保存房间权威快照与重连索引。
+	SnapshotRepository store.RoomSnapshotRepository
+	// SnapshotTimeout 限制单次 Redis 快照读写的最长时间。
+	SnapshotTimeout time.Duration
+	// SnapshotTTL 是活跃房间快照与玩家房间索引的兜底有效期。
+	SnapshotTTL time.Duration
 }
 
 // Manager 管理全部房间，并作为 Session 的入站路由实现。
@@ -81,6 +90,12 @@ func normalizeOptions(options Options) Options {
 	}
 	if options.PersistenceTimeout <= 0 {
 		options.PersistenceTimeout = defaultPersistenceTimeout
+	}
+	if options.SnapshotTimeout <= 0 {
+		options.SnapshotTimeout = defaultSnapshotTimeout
+	}
+	if options.SnapshotTTL <= 0 {
+		options.SnapshotTTL = defaultSnapshotTTL
 	}
 	return options
 }
@@ -184,6 +199,8 @@ func (m *Manager) handleCreateRoom(ctx context.Context, playerSession *session.S
 	m.rooms[roomID] = created
 	m.playerRoom[playerSession.PlayerID] = roomID
 	m.mu.Unlock()
+	// 初始快照通过 mailbox 生成，确保后续所有 Redis JSON 都来自同一个状态写协程。
+	_ = created.submitSync(ctx, commandSnapshot, nil, protocol.Envelope{})
 
 	// 初始状态仅发给房主；后续变更一律在房间 mailbox 内广播，避免跨协程读 Members。
 	_ = playerSession.SendEnvelope(mustRoomStateEnvelope(created.ID, created.MaxPlayers, created.OwnerID, playerSession))
@@ -288,9 +305,27 @@ func (m *Manager) removeRoom(roomID string) {
 // clearPlayerRoom 成员离开（leave/kick/disconnect）时清理 player→room 映射。
 func (m *Manager) clearPlayerRoom(roomID string, playerID int64) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.playerRoom[playerID] == roomID {
 		delete(m.playerRoom, playerID)
+	}
+	m.mu.Unlock()
+	if m.options.SnapshotRepository != nil {
+		// 条件删除与房间事件同步完成；仓储会防止迟到清理误删后来加入的新房间。
+		m.deletePlayerRoomSnapshot(roomID, playerID)
+	}
+}
+
+// deletePlayerRoomSnapshot 使用独立超时清理 Redis 重连索引，失败只记录边界错误。
+func (m *Manager) deletePlayerRoomSnapshot(roomID string, playerID int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), m.options.SnapshotTimeout)
+	defer cancel()
+	if err := m.options.SnapshotRepository.DeletePlayerRoom(ctx, roomID, playerID); err != nil {
+		m.logger.WithContext(ctx).Error(
+			"Redis 玩家房间索引清理失败",
+			"room_id", roomID,
+			"player_id", playerID,
+			"error", err,
+		)
 	}
 }
 

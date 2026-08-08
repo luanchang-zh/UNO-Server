@@ -16,6 +16,7 @@ import (
 	"github.com/luanchang-zh/UNO-Server/internal/server"
 	"github.com/luanchang-zh/UNO-Server/internal/store"
 	mysqlstore "github.com/luanchang-zh/UNO-Server/internal/store/mysql"
+	redisstore "github.com/luanchang-zh/UNO-Server/internal/store/redis"
 )
 
 // main 只负责呈现进程级错误并设置退出码，资源释放统一留在 run 中完成。
@@ -29,7 +30,7 @@ func main() {
 	logger.WithContext(rootCtx).Info("服务已退出")
 }
 
-// run 加载配置、装配 MySQL 与业务服务，并在退出前释放全部进程资源。
+// run 加载配置，装配 MySQL、Redis 与业务服务，并在退出前释放全部进程资源。
 func run(rootCtx context.Context, logger *logx.Logger) error {
 	cfg := config.Load()
 	if err := cfg.Validate(); err != nil {
@@ -40,11 +41,16 @@ func run(rootCtx context.Context, logger *logx.Logger) error {
 	if err != nil {
 		return fmt.Errorf("create id generator: %w", err)
 	}
-	playerRepository, matchRepository, closeRepository, err := openRepositories(rootCtx, cfg, logger)
+	playerRepository, matchRepository, closeMySQL, err := openMySQLRepositories(rootCtx, cfg, logger)
 	if err != nil {
 		return err
 	}
-	defer closeRepository()
+	defer closeMySQL()
+	sessionRepository, snapshotRepository, closeRedis, err := openRedisRepositories(rootCtx, cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer closeRedis()
 
 	authService := auth.NewService(auth.Options{
 		TokenTTL:           cfg.TokenTTL,
@@ -52,11 +58,20 @@ func run(rootCtx context.Context, logger *logx.Logger) error {
 		IDGenerator:        idGenerator,
 		PlayerRepository:   playerRepository,
 		PersistenceTimeout: cfg.MySQLOperationTimeout,
+		SessionRepository:  sessionRepository,
+		SessionTimeout:     cfg.RedisOperationTimeout,
 	})
 	httpServer := server.New(cfg, authService, logger, server.Dependencies{
-		IDGenerator:     idGenerator,
-		MatchRepository: matchRepository,
+		IDGenerator:            idGenerator,
+		MatchRepository:        matchRepository,
+		RoomSnapshotRepository: snapshotRepository,
 	})
+	restoreCtx, cancelRestore := context.WithTimeout(rootCtx, cfg.RedisOperationTimeout)
+	err = httpServer.RestoreRooms(restoreCtx)
+	cancelRestore()
+	if err != nil {
+		return err
+	}
 
 	// Start 在 ErrServerClosed 时返回 nil，其它监听错误经 channel 上报。
 	errCh := make(chan error, 1)
@@ -87,8 +102,8 @@ func run(rootCtx context.Context, logger *logx.Logger) error {
 	return nil
 }
 
-// openRepositories 按配置启用 MySQL，并返回避免 nil 指针装入接口的仓储端口。
-func openRepositories(
+// openMySQLRepositories 按配置启用 MySQL，并返回避免 nil 指针装入接口的仓储端口。
+func openMySQLRepositories(
 	rootCtx context.Context,
 	cfg config.Config,
 	logger *logx.Logger,
@@ -119,5 +134,35 @@ func openRepositories(
 		}
 	}
 	logger.WithContext(rootCtx).Info("MySQL 持久化已启用")
+	return repository, repository, func() { _ = repository.Close() }, nil
+}
+
+// openRedisRepositories 按配置启用 Redis，并让 token 与房间快照复用同一个连接池。
+func openRedisRepositories(
+	rootCtx context.Context,
+	cfg config.Config,
+	logger *logx.Logger,
+) (store.SessionRepository, store.RoomSnapshotRepository, func(), error) {
+	if cfg.RedisAddr == "" {
+		logger.WithContext(rootCtx).Warn("Redis 持久化未启用")
+		return nil, nil, func() {}, nil
+	}
+	openCtx, cancel := context.WithTimeout(rootCtx, cfg.RedisOperationTimeout)
+	repository, err := redisstore.Open(openCtx, redisstore.Options{
+		Addr:         cfg.RedisAddr,
+		Username:     cfg.RedisUsername,
+		Password:     cfg.RedisPassword,
+		DB:           cfg.RedisDB,
+		PoolSize:     cfg.RedisPoolSize,
+		MinIdleConns: cfg.RedisMinIdleConns,
+		DialTimeout:  cfg.RedisDialTimeout,
+		ReadTimeout:  cfg.RedisReadTimeout,
+		WriteTimeout: cfg.RedisWriteTimeout,
+	})
+	cancel()
+	if err != nil {
+		return nil, nil, func() {}, fmt.Errorf("open redis repository: %w", err)
+	}
+	logger.WithContext(rootCtx).Info("Redis token 与房间快照持久化已启用")
 	return repository, repository, func() { _ = repository.Close() }, nil
 }

@@ -11,12 +11,13 @@ import (
 
 // scheduleTurnTimer 根据当前行动玩家状态安排手动超时或托管行动事件。
 func (r *Room) scheduleTurnTimer() {
-	r.cancelTurnTimer()
 	if r.Phase != PhasePlaying || r.engine == nil {
+		r.cancelTurnTimer()
 		return
 	}
 	_, member, found := r.currentActorView()
 	if !found {
+		r.cancelTurnTimer()
 		return
 	}
 
@@ -26,14 +27,31 @@ func (r *Room) scheduleTurnTimer() {
 		delay = r.managedActionDelay
 		kind = commandAutoPlay
 	}
+	r.armTurnTimer(delay, kind)
+}
+
+// scheduleRecoveredTurn 复用快照中的剩余时限；已过期时至少保留一次托管行动间隔。
+func (r *Room) scheduleRecoveredTurn(savedDeadline *time.Time) {
+	delay := r.managedActionDelay
+	if savedDeadline != nil {
+		remaining := time.Until(savedDeadline.UTC())
+		if remaining > delay {
+			delay = remaining
+		}
+	}
+	r.armTurnTimer(delay, commandAutoPlay)
+}
+
+// armTurnTimer 统一安装带令牌的回合计时器，迟到事件会在 mailbox 内被丢弃。
+func (r *Room) armTurnTimer(delay time.Duration, kind commandKind) {
+	r.cancelTurnTimer()
+	if r.Phase != PhasePlaying || r.engine == nil || delay <= 0 {
+		return
+	}
 	token := r.turnToken
 	r.turnDeadline = time.Now().UTC().Add(delay)
 	r.turnTimer = time.AfterFunc(delay, func() {
-		command := roomCommand{kind: kind, timerToken: token}
-		select {
-		case <-r.closed:
-		case r.mailbox <- command:
-		}
+		_ = r.submit(roomCommand{kind: kind, timerToken: token})
 	})
 }
 

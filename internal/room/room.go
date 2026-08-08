@@ -87,10 +87,19 @@ type Room struct {
 	matchID        int64
 	matchStartedAt time.Time
 	matchSettled   bool
+	// Redis 快照由 mailbox 在每次状态事件后同步，规则引擎仍不感知外部存储。
+	snapshotsStore   store.RoomSnapshotRepository
+	snapshotTimeout  time.Duration
+	snapshotTTL      time.Duration
+	snapshotRevision uint64
+	destroyed        bool
 
 	mailbox chan roomCommand
 	closed  chan struct{}
 	logger  *logx.Logger
+	// submitMu 保证停止命令入队后不再接受可能永远无人消费的新命令。
+	submitMu sync.Mutex
+	closing  bool
 
 	// onEmpty 房间空员时回调 Manager 销毁。
 	onEmpty func(roomID string)
@@ -120,6 +129,7 @@ const (
 	commandReconnect
 	commandTurnTimeout
 	commandAutoPlay
+	commandSnapshot
 	commandStop
 )
 
@@ -166,6 +176,9 @@ func newRoom(
 		idGenerator:        options.IDGenerator,
 		matchesStore:       options.MatchRepository,
 		persistTimeout:     options.PersistenceTimeout,
+		snapshotsStore:     options.SnapshotRepository,
+		snapshotTimeout:    options.SnapshotTimeout,
+		snapshotTTL:        options.SnapshotTTL,
 		onEmpty:            hooks.onEmpty,
 		onMemberRemoved:    hooks.onMemberRemoved,
 	}
@@ -180,9 +193,10 @@ func (r *Room) loop() {
 		var err error
 		switch cmd.kind {
 		case commandStop:
+			err = r.syncSnapshot(cmd.ctx)
 			r.cancelTurnTimer()
 			if cmd.done != nil {
-				cmd.done <- nil
+				cmd.done <- err
 			}
 			return
 		case commandDisconnect:
@@ -193,8 +207,21 @@ func (r *Room) loop() {
 			r.handleAutomatedTurn(cmd.kind, cmd.timerToken)
 		case commandJoin:
 			err = r.tryJoin(cmd.session)
+		case commandSnapshot:
+			// 空命令只用于要求 mailbox 立即把当前权威状态写入 Redis。
 		case commandMessage:
 			err = r.handleMessage(cmd.ctx, cmd.session, cmd.envelope)
+		}
+		if snapshotErr := r.syncSnapshot(cmd.ctx); snapshotErr != nil {
+			ctx := cmd.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			r.logger.WithContext(ctx).Error(
+				"Redis 房间快照同步失败",
+				"room_id", r.ID,
+				"error", snapshotErr,
+			)
 		}
 		if cmd.done != nil {
 			cmd.done <- err
@@ -204,10 +231,21 @@ func (r *Room) loop() {
 
 // submit 投递命令；房间已关闭则返回错误。
 func (r *Room) submit(cmd roomCommand) error {
+	r.submitMu.Lock()
+	defer r.submitMu.Unlock()
+	if r.closing {
+		return fmt.Errorf("room closing: %w", errs.ErrRoomNotFound)
+	}
 	select {
 	case <-r.closed:
 		return fmt.Errorf("room closed: %w", errs.ErrRoomNotFound)
+	default:
+	}
+	select {
 	case r.mailbox <- cmd:
+		if cmd.kind == commandStop {
+			r.closing = true
+		}
 		return nil
 	default:
 		return fmt.Errorf("room mailbox full: %w", errs.ErrInternal)
@@ -216,6 +254,9 @@ func (r *Room) submit(cmd roomCommand) error {
 
 // submitSync 投递并等待处理完成（便于单测）。
 func (r *Room) submitSync(ctx context.Context, kind commandKind, playerSession *session.Session, envelope protocol.Envelope) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	done := make(chan error, 1)
 	if err := r.submit(roomCommand{
 		ctx:      ctx,
@@ -396,6 +437,7 @@ func (r *Room) removeMember(playerID int64) {
 	}
 
 	if len(r.Members) == 0 {
+		r.destroyed = true
 		if r.onEmpty != nil {
 			r.onEmpty(r.ID)
 		}

@@ -28,7 +28,7 @@ var upgrader = websocket.Upgrader{
 // 断线日志与登记清理由 Session.Close / Manager 负责。
 func (s *Server) handleWebSocket(writer http.ResponseWriter, request *http.Request) {
 	token := request.URL.Query().Get("token")
-	authSession, err := s.auth.Authenticate(token)
+	authSession, err := s.auth.AuthenticateContext(request.Context(), token)
 	if err != nil {
 		status, code, message := mapAuthError(err)
 		writeError(writer, status, code, message)
