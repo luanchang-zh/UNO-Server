@@ -79,6 +79,12 @@ func TestRoom_CreateJoinReadyStart(t *testing.T) {
 
 // dialPlayer 登录并建立 WebSocket。
 func dialPlayer(t *testing.T, testServer *httptest.Server, authService *auth.Service, nickname string) *websocket.Conn {
+	conn, _ := dialPlayerWithID(t, testServer, authService, nickname)
+	return conn
+}
+
+// dialPlayerWithID 登录、建立 WebSocket，并同时返回服务端分配的玩家 ID。
+func dialPlayerWithID(t *testing.T, testServer *httptest.Server, authService *auth.Service, nickname string) (*websocket.Conn, int64) {
 	t.Helper()
 	result, err := authService.LoginGuest(nickname)
 	if err != nil {
@@ -92,7 +98,7 @@ func dialPlayer(t *testing.T, testServer *httptest.Server, authService *auth.Ser
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
-	return conn
+	return conn, result.Player.ID
 }
 
 // writeWS 发送 WebSocket 协议消息。
