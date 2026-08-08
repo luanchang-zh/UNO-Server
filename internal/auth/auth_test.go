@@ -1,17 +1,23 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/luanchang-zh/UNO-Server/internal/model/entity"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 )
 
 // TestLoginGuest_DefaultNickname 验证空昵称回落为默认「游客」。
 func TestLoginGuest_DefaultNickname(t *testing.T) {
-	service := NewService(Options{TokenTTL: time.Hour, MaxNicknameLen: 32})
+	service := NewService(Options{
+		TokenTTL:       time.Hour,
+		MaxNicknameLen: 32,
+		IDGenerator:    &fixedIDGenerator{next: 1},
+	})
 
 	result, err := service.LoginGuest("  ")
 	if err != nil {
@@ -25,6 +31,44 @@ func TestLoginGuest_DefaultNickname(t *testing.T) {
 	}
 	if result.Token == "" {
 		t.Fatal("token 不应为空")
+	}
+}
+
+// TestLoginGuest_PersistsBeforePublishingSession 验证玩家写库成功后才发布可鉴权的内存 token。
+func TestLoginGuest_PersistsBeforePublishingSession(t *testing.T) {
+	repository := &recordingPlayerRepository{}
+	service := NewService(Options{
+		TokenTTL:         time.Hour,
+		MaxNicknameLen:   32,
+		IDGenerator:      &fixedIDGenerator{next: 42},
+		PlayerRepository: repository,
+	})
+	result, err := service.LoginGuestContext(context.Background(), "持久化玩家")
+	if err != nil {
+		t.Fatalf("登录失败：%v", err)
+	}
+	if repository.player.ID != 42 || repository.player.Nickname != "持久化玩家" {
+		t.Fatalf("持久化玩家不正确：%+v", repository.player)
+	}
+	if _, err := service.Authenticate(result.Token); err != nil {
+		t.Fatalf("持久化成功后的 token 不可用：%v", err)
+	}
+}
+
+// TestLoginGuest_DoesNotPublishWhenPersistenceFails 验证写库失败时不会返回半成功登录结果。
+func TestLoginGuest_DoesNotPublishWhenPersistenceFails(t *testing.T) {
+	repository := &recordingPlayerRepository{err: errors.New("模拟数据库失败")}
+	service := NewService(Options{
+		TokenTTL:         time.Hour,
+		IDGenerator:      &fixedIDGenerator{next: 43},
+		PlayerRepository: repository,
+	})
+	result, err := service.LoginGuestContext(context.Background(), "失败玩家")
+	if err == nil {
+		t.Fatal("玩家写库失败后登录仍然成功")
+	}
+	if result.Token != "" || result.Player.ID != 0 {
+		t.Fatalf("失败登录泄露半成品结果：%+v", result)
 	}
 }
 
@@ -96,4 +140,26 @@ func TestLoginGuest_RejectControlChar(t *testing.T) {
 	if !strings.Contains(err.Error(), "非法字符") {
 		t.Fatalf("错误信息应提示非法字符，实际 %v", err)
 	}
+}
+
+// fixedIDGenerator 为鉴权单测返回可预测的玩家 ID。
+type fixedIDGenerator struct {
+	next int64
+}
+
+// Next 返回预设 ID。
+func (g *fixedIDGenerator) Next() (int64, error) {
+	return g.next, nil
+}
+
+// recordingPlayerRepository 记录最后一次玩家写入，并可注入失败。
+type recordingPlayerRepository struct {
+	player entity.Player
+	err    error
+}
+
+// CreatePlayer 实现玩家持久化测试端口。
+func (r *recordingPlayerRepository) CreatePlayer(_ context.Context, player entity.Player) error {
+	r.player = player
+	return r.err
 }

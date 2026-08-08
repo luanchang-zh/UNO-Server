@@ -1,6 +1,7 @@
 package room
 
 import (
+	"context"
 	"crypto/rand"
 	"math/big"
 	"time"
@@ -121,7 +122,8 @@ func (r *Room) finishAutomatedAction(memberStateChanged bool) {
 	if !found && r.engine != nil && len(r.Members) > 0 {
 		view, _ = r.engine.ViewFor(r.Members[0].PlayerID)
 	}
-	if view.Phase == uno.PhaseFinished {
+	shouldPersistSettlement := view.Phase == uno.PhaseFinished
+	if shouldPersistSettlement {
 		r.Phase = PhaseSettled
 		r.cancelTurnTimer()
 		memberStateChanged = true
@@ -133,6 +135,16 @@ func (r *Room) finishAutomatedAction(memberStateChanged bool) {
 		r.scheduleTurnTimer()
 	}
 	r.broadcastGameState()
+	if shouldPersistSettlement {
+		if err := r.persistSettlement(view.Result); err != nil {
+			r.logger.WithContext(context.Background()).Error(
+				"自动牌局结算持久化失败",
+				"room_id", r.ID,
+				"match_id", r.matchID,
+				"error", err,
+			)
+		}
+	}
 }
 
 // currentActorView 返回当前行动玩家自己的安全视图和成员状态。

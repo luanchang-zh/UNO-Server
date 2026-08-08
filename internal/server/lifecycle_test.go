@@ -175,7 +175,7 @@ func newLifecycleTestServer(
 	runtimeConfig.TokenTTL = time.Hour
 	runtimeConfig.MaxNicknameLen = 32
 	authService := auth.NewService(auth.Options{TokenTTL: time.Hour, MaxNicknameLen: 32})
-	srv := New(runtimeConfig, authService, logger)
+	srv := New(runtimeConfig, authService, logger, Dependencies{})
 	testServer := httptest.NewServer(srv.httpServer.Handler)
 	t.Cleanup(testServer.Close)
 	return srv, testServer, authService

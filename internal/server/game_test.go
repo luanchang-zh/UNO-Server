@@ -15,6 +15,7 @@ import (
 	"github.com/luanchang-zh/UNO-Server/internal/auth"
 	"github.com/luanchang-zh/UNO-Server/internal/config"
 	"github.com/luanchang-zh/UNO-Server/internal/game/uno"
+	"github.com/luanchang-zh/UNO-Server/internal/idgen"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 	"github.com/luanchang-zh/UNO-Server/internal/protocol"
@@ -31,8 +32,20 @@ func TestRoom_PlayCompleteGame(t *testing.T) {
 		TokenTTL:        time.Hour,
 		MaxNicknameLen:  32,
 	}
-	authService := auth.NewService(auth.Options{TokenTTL: time.Hour, MaxNicknameLen: 32})
-	srv := New(cfg, authService, logger)
+	generator, err := idgen.New(7)
+	if err != nil {
+		t.Fatalf("创建 ID 生成器失败：%v", err)
+	}
+	repository := newRecordingMatchRepository()
+	authService := auth.NewService(auth.Options{
+		TokenTTL:       time.Hour,
+		MaxNicknameLen: 32,
+		IDGenerator:    generator,
+	})
+	srv := New(cfg, authService, logger, Dependencies{
+		IDGenerator:     generator,
+		MatchRepository: repository,
+	})
 	testServer := httptest.NewServer(srv.httpServer.Handler)
 	defer testServer.Close()
 
@@ -137,6 +150,7 @@ func TestRoom_PlayCompleteGame(t *testing.T) {
 	if !unoCatchExercised {
 		t.Fatal("完整一局中未覆盖漏喊 UNO 与抓罚流程")
 	}
+	repository.assertSettlement(t, roomID, ownerView.Result)
 }
 
 // sendAutomatedGameCommand 根据当前玩家的服务端合法牌提示推进一步。

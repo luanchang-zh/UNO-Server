@@ -31,7 +31,7 @@ func TestRoom_CreateJoinReadyStart(t *testing.T) {
 		MaxNicknameLen:  32,
 	}
 	authService := auth.NewService(auth.Options{TokenTTL: time.Hour, MaxNicknameLen: 32})
-	srv := New(cfg, authService, logger)
+	srv := New(cfg, authService, logger, Dependencies{})
 	testServer := httptest.NewServer(srv.httpServer.Handler)
 	defer testServer.Close()
 

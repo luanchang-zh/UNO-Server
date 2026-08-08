@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/luanchang-zh/UNO-Server/internal/game/uno"
+	"github.com/luanchang-zh/UNO-Server/internal/idgen"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 	"github.com/luanchang-zh/UNO-Server/internal/protocol"
 	"github.com/luanchang-zh/UNO-Server/internal/session"
+	"github.com/luanchang-zh/UNO-Server/internal/store"
 )
 
 // 房间阶段。
@@ -78,6 +80,13 @@ type Room struct {
 	turnTimeout        time.Duration
 	managedActionDelay time.Duration
 	timeoutStrikeLimit int
+	// 持久化只在登录之外的开局和终局边界执行，不进入普通回合热路径。
+	idGenerator    idgen.Source
+	matchesStore   store.MatchRepository
+	persistTimeout time.Duration
+	matchID        int64
+	matchStartedAt time.Time
+	matchSettled   bool
 
 	mailbox chan roomCommand
 	closed  chan struct{}
@@ -154,6 +163,9 @@ func newRoom(
 		turnTimeout:        options.TurnTimeout,
 		managedActionDelay: options.ManagedActionDelay,
 		timeoutStrikeLimit: options.TimeoutStrikeLimit,
+		idGenerator:        options.IDGenerator,
+		matchesStore:       options.MatchRepository,
+		persistTimeout:     options.PersistenceTimeout,
 		onEmpty:            hooks.onEmpty,
 		onMemberRemoved:    hooks.onMemberRemoved,
 	}
@@ -226,7 +238,6 @@ func (r *Room) submitSync(ctx context.Context, kind commandKind, playerSession *
 
 // handleMessage 处理房间内业务消息。
 func (r *Room) handleMessage(ctx context.Context, playerSession *session.Session, envelope protocol.Envelope) error {
-	_ = ctx
 	member := r.findMember(playerSession.PlayerID)
 	if member == nil || member.Session != playerSession || !member.Connected {
 		return r.replyError(playerSession, envelope.RequestID, errs.CodeNotInRoom, "当前连接未绑定房间座位")
@@ -235,7 +246,7 @@ func (r *Room) handleMessage(ctx context.Context, playerSession *session.Session
 	case protocol.TypeReady:
 		return r.handleReady(playerSession, envelope)
 	case protocol.TypeStart:
-		return r.handleStart(playerSession, envelope)
+		return r.handleStart(ctx, playerSession, envelope)
 	case protocol.TypeLeaveRoom:
 		return r.handleLeave(playerSession, envelope)
 	case protocol.TypeKick:
@@ -274,7 +285,7 @@ func (r *Room) handleReady(playerSession *session.Session, envelope protocol.Env
 }
 
 // handleStart 校验开局门槛，并按当前座位顺序创建和广播一局 UNO 引擎。
-func (r *Room) handleStart(playerSession *session.Session, envelope protocol.Envelope) error {
+func (r *Room) handleStart(ctx context.Context, playerSession *session.Session, envelope protocol.Envelope) error {
 	if playerSession.PlayerID != r.OwnerID {
 		return r.replyError(playerSession, envelope.RequestID, errs.CodeNotRoomOwner, errs.ErrNotRoomOwner.Error())
 	}
@@ -296,6 +307,10 @@ func (r *Room) handleStart(playerSession *session.Session, envelope protocol.Env
 	engine, err := uno.New(playerIDs, uno.Config{})
 	if err != nil {
 		return r.replyError(playerSession, envelope.RequestID, errs.CodeInternal, "创建牌局失败")
+	}
+	if err := r.persistMatchStart(ctx, time.Now().UTC()); err != nil {
+		_ = r.replyError(playerSession, envelope.RequestID, errs.CodeInternal, "记录对局失败，请稍后重试")
+		return fmt.Errorf("persist match start: %w", err)
 	}
 	r.engine = engine
 	r.Phase = PhasePlaying

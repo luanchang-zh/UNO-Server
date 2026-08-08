@@ -3,6 +3,7 @@ package room
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -73,6 +74,7 @@ func (r *Room) finishGameCommand(playerSession *session.Session, requestID strin
 		return r.replyError(playerSession, requestID, errs.CodeInternal, "生成牌局视图失败")
 	}
 	roomStateChanged := false
+	shouldPersistSettlement := false
 	if turnAction {
 		member := r.findMember(playerSession.PlayerID)
 		if member != nil && (member.TimeoutStrikes != 0 || member.AutoPlay) {
@@ -85,6 +87,7 @@ func (r *Room) finishGameCommand(playerSession *session.Session, requestID strin
 		r.Phase = PhaseSettled
 		r.cancelTurnTimer()
 		roomStateChanged = true
+		shouldPersistSettlement = true
 	}
 	if roomStateChanged {
 		r.broadcastState()
@@ -93,6 +96,11 @@ func (r *Room) finishGameCommand(playerSession *session.Session, requestID strin
 		r.scheduleTurnTimer()
 	}
 	r.broadcastGameState()
+	if shouldPersistSettlement {
+		if err := r.persistSettlement(requesterView.Result); err != nil {
+			return fmt.Errorf("persist game settlement: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -165,7 +165,7 @@ func newTestServer(logOutput io.Writer) *Server {
 		MaxNicknameLen: cfg.MaxNicknameLen,
 	})
 	base := slog.New(slog.NewJSONHandler(logOutput, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	return New(cfg, authService, logx.NewFromSlog(base))
+	return New(cfg, authService, logx.NewFromSlog(base), Dependencies{})
 }
 
 // nonEmptyLines 按行拆分并去掉空行。

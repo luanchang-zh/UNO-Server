@@ -11,19 +11,22 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luanchang-zh/UNO-Server/internal/idgen"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 	"github.com/luanchang-zh/UNO-Server/internal/protocol"
 	"github.com/luanchang-zh/UNO-Server/internal/session"
+	"github.com/luanchang-zh/UNO-Server/internal/store"
 )
 
 const (
 	defaultTurnTimeout        = 20 * time.Second
 	defaultManagedActionDelay = 200 * time.Millisecond
 	defaultTimeoutStrikeLimit = 2
+	defaultPersistenceTimeout = 3 * time.Second
 )
 
-// Options 控制房间回合计时和自动托管行为。
+// Options 控制房间回合计时、自动托管和持久化边界行为。
 type Options struct {
 	// TurnTimeout 是连接中玩家一次手动行动的等待上限。
 	TurnTimeout time.Duration
@@ -31,6 +34,12 @@ type Options struct {
 	ManagedActionDelay time.Duration
 	// TimeoutStrikeLimit 是连续超时多少次后进入托管。
 	TimeoutStrikeLimit int
+	// IDGenerator 为对局和逐玩家结果生成业务主键。
+	IDGenerator idgen.Source
+	// MatchRepository 非空时在开局与终局边界写入 MySQL。
+	MatchRepository store.MatchRepository
+	// PersistenceTimeout 限制单次开局或结算写入的最长时间。
+	PersistenceTimeout time.Duration
 }
 
 // Manager 管理全部房间，并作为 Session 的入站路由实现。
@@ -67,7 +76,22 @@ func normalizeOptions(options Options) Options {
 	if options.TimeoutStrikeLimit <= 0 {
 		options.TimeoutStrikeLimit = defaultTimeoutStrikeLimit
 	}
+	if options.IDGenerator == nil {
+		options.IDGenerator = defaultRoomIDGenerator()
+	}
+	if options.PersistenceTimeout <= 0 {
+		options.PersistenceTimeout = defaultPersistenceTimeout
+	}
 	return options
+}
+
+// defaultRoomIDGenerator 创建测试和无显式装配场景使用的单节点生成器。
+func defaultRoomIDGenerator() idgen.Source {
+	generator, err := idgen.New(0)
+	if err != nil {
+		panic(fmt.Sprintf("create default room id generator: %v", err))
+	}
+	return generator
 }
 
 // Route 实现 session.InboundRouter：处理房间类消息。

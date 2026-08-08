@@ -12,11 +12,21 @@ import (
 
 	"github.com/luanchang-zh/UNO-Server/internal/auth"
 	"github.com/luanchang-zh/UNO-Server/internal/config"
+	"github.com/luanchang-zh/UNO-Server/internal/idgen"
 	"github.com/luanchang-zh/UNO-Server/internal/logx"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
 	"github.com/luanchang-zh/UNO-Server/internal/room"
 	"github.com/luanchang-zh/UNO-Server/internal/session"
+	"github.com/luanchang-zh/UNO-Server/internal/store"
 )
+
+// Dependencies 汇总 HTTP Server 之外由进程入口装配的业务依赖。
+type Dependencies struct {
+	// IDGenerator 与鉴权服务共享节点生成器，避免业务主键碰撞。
+	IDGenerator idgen.Source
+	// MatchRepository 非空时记录开局和终局结算。
+	MatchRepository store.MatchRepository
+}
 
 // Server 封装标准库 HTTP 服务。
 type Server struct {
@@ -28,8 +38,8 @@ type Server struct {
 	logger     *logx.Logger
 }
 
-// New 根据配置创建 HTTP Server 并注册路由。
-func New(cfg config.Config, authService *auth.Service, logger *logx.Logger) *Server {
+// New 根据配置和进程依赖创建 HTTP Server 并注册路由。
+func New(cfg config.Config, authService *auth.Service, logger *logx.Logger, dependencies Dependencies) *Server {
 	if logger == nil {
 		logger = logx.NewFromSlog(nil)
 	}
@@ -43,6 +53,9 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger) *Ser
 			TurnTimeout:        cfg.TurnTimeout,
 			ManagedActionDelay: cfg.ManagedActionDelay,
 			TimeoutStrikeLimit: cfg.TimeoutStrikeLimit,
+			IDGenerator:        dependencies.IDGenerator,
+			MatchRepository:    dependencies.MatchRepository,
+			PersistenceTimeout: cfg.MySQLOperationTimeout,
 		}),
 		logger: logger,
 	}
@@ -113,7 +126,7 @@ func (s *Server) handleGuestLogin(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
-	result, err := s.auth.LoginGuest(body.Nickname)
+	result, err := s.auth.LoginGuestContext(request.Context(), body.Nickname)
 	if err != nil {
 		if errors.Is(err, errs.ErrInvalidNickname) {
 			writeError(writer, http.StatusBadRequest, errs.CodeInvalidNickname, err.Error())

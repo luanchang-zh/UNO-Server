@@ -1,20 +1,22 @@
-// Package auth 提供游客登录、token 签发与校验（当前为进程内内存实现）。
+// Package auth 提供游客登录、玩家持久化、token 签发与内存校验。
 //
 // 玩家实体见 model/entity；哨兵错误见 model/errs；后续 token 可落到 Redis（rediskey.Session）。
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/luanchang-zh/UNO-Server/internal/idgen"
 	"github.com/luanchang-zh/UNO-Server/internal/model/entity"
 	"github.com/luanchang-zh/UNO-Server/internal/model/errs"
+	"github.com/luanchang-zh/UNO-Server/internal/store"
 )
 
 // TokenSession 表示一次登录会话（token 与玩家绑定，非 MySQL 表；后续对应 Redis session）。
@@ -31,8 +33,11 @@ type TokenSession struct {
 
 // LoginResult 为游客登录成功后的返回值。
 type LoginResult struct {
-	Player    entity.Player
-	Token     string
+	// Player 是本次创建并已经持久化的玩家实体。
+	Player entity.Player
+	// Token 是绑定该玩家的内存访问凭证。
+	Token string
+	// ExpiresAt 是 token 的 UTC 过期时间。
 	ExpiresAt time.Time
 }
 
@@ -42,20 +47,28 @@ type Options struct {
 	TokenTTL time.Duration
 	// MaxNicknameLen 为昵称最大 Unicode 字符数。
 	MaxNicknameLen int
+	// IDGenerator 为玩家生成跨进程可持久化的业务主键。
+	IDGenerator idgen.Source
+	// PlayerRepository 非空时要求登录成功前先持久化玩家。
+	PlayerRepository store.PlayerRepository
+	// PersistenceTimeout 限制单次玩家持久化的最长时间。
+	PersistenceTimeout time.Duration
 }
 
 // Service 提供登录与 token 校验能力。
 type Service struct {
 	tokenTTL       time.Duration
 	maxNicknameLen int
-	nextPlayerID   atomic.Int64
+	idGenerator    idgen.Source
+	playersStore   store.PlayerRepository
+	persistTimeout time.Duration
 
 	mu       sync.RWMutex
 	players  map[int64]*entity.Player
 	sessions map[string]*TokenSession // token 到会话的索引
 }
 
-// NewService 创建内存版鉴权服务。
+// NewService 创建鉴权服务；玩家仓储可选，token 会话保持进程内存实现。
 func NewService(options Options) *Service {
 	if options.TokenTTL <= 0 {
 		options.TokenTTL = 24 * time.Hour
@@ -63,20 +76,32 @@ func NewService(options Options) *Service {
 	if options.MaxNicknameLen <= 0 {
 		options.MaxNicknameLen = 32
 	}
+	if options.IDGenerator == nil {
+		options.IDGenerator = defaultIDGenerator()
+	}
+	if options.PersistenceTimeout <= 0 {
+		options.PersistenceTimeout = 3 * time.Second
+	}
 
 	service := &Service{
 		tokenTTL:       options.TokenTTL,
 		maxNicknameLen: options.MaxNicknameLen,
+		idGenerator:    options.IDGenerator,
+		playersStore:   options.PlayerRepository,
+		persistTimeout: options.PersistenceTimeout,
 		players:        make(map[int64]*entity.Player),
 		sessions:       make(map[string]*TokenSession),
 	}
-	// 从 1 起分配，避免 0 被当成「未设置」。
-	service.nextPlayerID.Store(1)
 	return service
 }
 
-// LoginGuest 创建游客玩家并签发 token；nickname 为空时使用默认昵称。
+// LoginGuest 使用后台上下文创建游客玩家，主要供内部调用和测试使用。
 func (s *Service) LoginGuest(nickname string) (LoginResult, error) {
+	return s.LoginGuestContext(context.Background(), nickname)
+}
+
+// LoginGuestContext 创建游客玩家并签发 token；启用仓储时先写 MySQL 再发布内存会话。
+func (s *Service) LoginGuestContext(ctx context.Context, nickname string) (LoginResult, error) {
 	normalized, err := s.normalizeNickname(nickname)
 	if err != nil {
 		return LoginResult{}, err
@@ -86,10 +111,14 @@ func (s *Service) LoginGuest(nickname string) (LoginResult, error) {
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("generate token: %w", err)
 	}
+	playerID, err := s.idGenerator.Next()
+	if err != nil {
+		return LoginResult{}, fmt.Errorf("generate player id: %w", err)
+	}
 
 	now := time.Now().UTC()
 	player := &entity.Player{
-		ID:          s.nextPlayerID.Add(1) - 1,
+		ID:          playerID,
 		Nickname:    normalized,
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -102,6 +131,17 @@ func (s *Service) LoginGuest(nickname string) (LoginResult, error) {
 		Nickname:  player.Nickname,
 		ExpiresAt: expiresAt,
 	}
+	if s.playersStore != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		persistCtx, cancel := context.WithTimeout(ctx, s.persistTimeout)
+		err = s.playersStore.CreatePlayer(persistCtx, *player)
+		cancel()
+		if err != nil {
+			return LoginResult{}, fmt.Errorf("persist player %d: %w", player.ID, err)
+		}
+	}
 
 	s.mu.Lock()
 	s.players[player.ID] = player
@@ -113,6 +153,15 @@ func (s *Service) LoginGuest(nickname string) (LoginResult, error) {
 		Token:     token,
 		ExpiresAt: expiresAt,
 	}, nil
+}
+
+// defaultIDGenerator 创建单进程默认节点生成器；生产入口会注入显式节点号。
+func defaultIDGenerator() idgen.Source {
+	generator, err := idgen.New(0)
+	if err != nil {
+		panic(fmt.Sprintf("create default id generator: %v", err))
+	}
+	return generator
 }
 
 // Authenticate 校验 token，成功返回对应会话；过期 token 会被清理。
