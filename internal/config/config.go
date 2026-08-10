@@ -70,6 +70,8 @@ type Config struct {
 	RedisOperationTimeout time.Duration
 	// RedisRoomSnapshotTTL 是活跃房间快照与玩家房间索引的兜底有效期。
 	RedisRoomSnapshotTTL time.Duration
+	// WebDir 是前端构建产物目录；目录不存在时不挂载静态页面。
+	WebDir string
 }
 
 // Load 从环境变量读取配置，未设置时使用本地开发默认值。
@@ -117,6 +119,7 @@ func Load() Config {
 		RedisWriteTimeout:     envDurationOrDefault("UNO_REDIS_WRITE_TIMEOUT", 2*time.Second),
 		RedisOperationTimeout: envDurationOrDefault("UNO_REDIS_OPERATION_TIMEOUT", 2*time.Second),
 		RedisRoomSnapshotTTL:  envDurationOrDefault("UNO_REDIS_ROOM_SNAPSHOT_TTL", 2*time.Hour),
+		WebDir:                envOrDefault("UNO_WEB_DIR", "web/dist"),
 	}
 }
 

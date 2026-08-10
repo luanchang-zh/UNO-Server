@@ -8,3 +8,5 @@ coverage.html
 *.exe
 *.test
 *.log
+web/node_modules
+web/dist

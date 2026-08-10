@@ -81,6 +81,13 @@ func New(cfg config.Config, authService *auth.Service, logger *logx.Logger, depe
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("POST /api/v1/auth/guest", srv.handleGuestLogin)
 	mux.HandleFunc("GET /ws", srv.handleWebSocket)
+	if registerStatic(mux, cfg.WebDir) {
+		logger.WithContext(context.Background()).Info(
+			"静态前端已挂载",
+			"event", "static_web_mounted",
+			"web_dir", cfg.WebDir,
+		)
+	}
 	if metrics != nil {
 		metrics.RegisterRuntimeGauges(srv.rooms.Count, srv.sessions.Count)
 		mux.Handle("GET /metrics", metrics.Handler())
