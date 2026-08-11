@@ -31,7 +31,11 @@ export function LoginPage() {
           onChange={(e) => setNickname(e.target.value)}
           autoFocus
         />
-        <button className="btn btn-primary" type="submit" disabled={loggingIn}>
+        <button
+          className={`btn btn-primary ${loggingIn ? 'busy' : ''}`}
+          type="submit"
+          disabled={loggingIn}
+        >
           {loggingIn ? '登录中…' : '进入游戏'}
         </button>
       </form>

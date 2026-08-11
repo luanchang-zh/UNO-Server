@@ -18,19 +18,26 @@ export function App() {
   }, [token, connect])
 
   let screen
+  let screenKey: string
   if (!token) {
     screen = <LoginPage />
+    screenKey = 'login'
   } else if (!room) {
     screen = <LobbyPage />
+    screenKey = 'lobby'
   } else if (room.phase === 'waiting') {
     screen = <RoomPage />
+    screenKey = 'room'
   } else {
     screen = <GamePage />
+    screenKey = 'game'
   }
 
   return (
     <>
-      {screen}
+      <main className="screen-shell" key={screenKey}>
+        {screen}
+      </main>
       <Toasts />
     </>
   )

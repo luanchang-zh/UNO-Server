@@ -54,6 +54,7 @@ function Table({ room, game }: { room: RoomStatePayload; game: GameStatePayload 
   const myChallenge = game.uno_challenges?.some((c) => c.player_id === playerId)
   const opponents = game.players.filter((p) => p.player_id !== playerId)
   const canAct = isMyTurn && (game.phase === 'playing' || awaitingDrawDecision)
+  const canDraw = canAct && !needChooseColor && game.phase === 'playing'
 
   const handClickable = (cardId: number): boolean => {
     if (!canAct || needChooseColor) return false
@@ -100,7 +101,7 @@ function Table({ room, game }: { room: RoomStatePayload; game: GameStatePayload 
 
       {/* 对手席位 */}
       <div className="opponents">
-        {opponents.map((opponent) => {
+        {opponents.map((opponent, opponentIndex) => {
           const member = room.members.find(
             (m) => m.player_id === opponent.player_id,
           )
@@ -113,6 +114,7 @@ function Table({ room, game }: { room: RoomStatePayload; game: GameStatePayload 
             <div
               key={opponent.player_id}
               className={`seat ${isCurrent ? 'current' : ''}`}
+              style={{ animationDelay: `${opponentIndex * 65}ms` }}
             >
               <div className="avatar" style={avatarStyle(opponent.seat)}>
                 {nicknameOf(opponent.player_id).slice(0, 1).toUpperCase()}
@@ -131,7 +133,7 @@ function Table({ room, game }: { room: RoomStatePayload; game: GameStatePayload 
                 ))}
               </div>
               <div className="count">
-                <b>{opponent.cards}</b> 张
+                <b key={opponent.cards} className="count-value">{opponent.cards}</b> 张
               </div>
               {challenged && (
                 <button
@@ -150,13 +152,23 @@ function Table({ room, game }: { room: RoomStatePayload; game: GameStatePayload 
       <div className="table-center">
         <div className="pile">
           <div
-            className={`draw-pile ${canAct && !needChooseColor && game.phase === 'playing' ? 'pulse' : ''}`}
-            onClick={() => canAct && game.phase === 'playing' && drawCard()}
+            className={`draw-pile ${canDraw ? 'pulse' : ''}`}
+            onClick={() => canDraw && drawCard()}
+            onKeyDown={(event) => {
+              if (canDraw && (event.key === 'Enter' || event.key === ' ')) {
+                event.preventDefault()
+                drawCard()
+              }
+            }}
+            role="button"
+            tabIndex={canDraw ? 0 : -1}
+            aria-disabled={!canDraw}
             title={game.pending_draw > 0 ? `接受 +${game.pending_draw} 罚牌` : '摸一张牌'}
           >
             <div className="stack" style={{ transform: 'translate(4px, 4px)' }} />
             <div className="stack" style={{ transform: 'translate(2px, 2px)' }} />
             <div className="stack" />
+            <span key={game.draw_pile_count} className="draw-feedback" aria-hidden="true" />
             {game.pending_draw > 0 && (
               <div className="pending-badge">+{game.pending_draw}</div>
             )}
@@ -237,9 +249,19 @@ function Table({ room, game }: { room: RoomStatePayload; game: GameStatePayload 
                   transform: `rotate(${angle}deg) translateY(${lift}px)`,
                   marginLeft: index === 0 ? 0 : overlap,
                   zIndex: index,
+                  animationDelay: `${Math.min(index, 12) * 24}ms`,
                 }}
                 title={cardLabel(card)}
                 onClick={() => playable && playCard(card.id)}
+                onKeyDown={(event) => {
+                  if (playable && (event.key === 'Enter' || event.key === ' ')) {
+                    event.preventDefault()
+                    playCard(card.id)
+                  }
+                }}
+                role="button"
+                tabIndex={playable ? 0 : -1}
+                aria-disabled={!playable}
               >
                 <UnoCard card={card} width={96} />
               </div>

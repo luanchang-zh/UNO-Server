@@ -46,6 +46,7 @@ export function RoomPage() {
             <div
               key={member.player_id}
               className={`member-card ${member.player_id === playerId ? 'me' : ''}`}
+              style={{ animationDelay: `${Math.min(index, 5) * 55}ms` }}
             >
               {member.is_owner && <span className="crown" title="房主">👑</span>}
               {isOwner && !member.is_owner && (
@@ -70,7 +71,11 @@ export function RoomPage() {
             </div>
           ))}
           {Array.from({ length: emptySeats }, (_, i) => (
-            <div key={`empty-${i}`} className="member-card empty">
+            <div
+              key={`empty-${i}`}
+              className="member-card empty"
+              style={{ animationDelay: `${Math.min(room.members.length + i, 5) * 55}ms` }}
+            >
               等待加入…
             </div>
           ))}
@@ -79,7 +84,7 @@ export function RoomPage() {
         <div className="row" style={{ justifyContent: 'center', marginTop: 6 }}>
           {isOwner ? (
             <button
-              className="btn btn-primary"
+              className={`btn btn-primary ${allReady ? 'ready-to-start' : ''}`}
               disabled={!allReady}
               onClick={startGame}
               title={allReady ? '' : '所有玩家准备后才能开始'}
